@@ -1,1 +1,4 @@
 *.sgy
+*.docx
+*.venv
+*.obsidian

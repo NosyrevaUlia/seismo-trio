@@ -2,7 +2,7 @@ import streamlit as st
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
-from scipy.signal import hilbert
+import scipy.signal # pyright: ignore[reportMissingImports]
 import io
 
 # ============================================================
@@ -131,7 +131,7 @@ num_horizons = st.sidebar.slider("Количество отражающих го
 
 # Параметры дискретизации
 dt = st.sidebar.number_input("Интервал дискретизации dt (мс)",
-                             min_value=1.0, max_value=4.0, value=1.0) / 1000
+                             min_value=1.0, max_value=4.0, value=2.0) / 1000
 
 # Длительность записи
 total_time = st.sidebar.number_input("Длительность записи (с)",
@@ -151,11 +151,11 @@ amplitude = st.sidebar.slider("Амплитуда", 50, 2500, 1000)
 # ============================================================
 st.sidebar.subheader("📊 Геологическая модель")
 
-# ✅ Максимальная глубина 12000 м
+# Максимальная глубина 12000 м
 MAX_DEPTH = 12000
 
 
-# ✅ Генерируем значения по умолчанию
+# Генерируем значения по умолчанию
 def generate_default_values(num_horizons):
     """Генерирует значения по умолчанию для заданного количества горизонтов"""
     depths = []
@@ -211,7 +211,7 @@ for i in range(num_horizons):
     depth_val = default_depths[i + 1] if i + 1 < len(default_depths) else 500 + i * 500
     depth = st.sidebar.number_input(
         f"Глубина {i + 1} (м)",
-        min_value=100, max_value=MAX_DEPTH,  # ✅ 12000 м
+        min_value=100, max_value=MAX_DEPTH,  # 12000 м
         value=depth_val
     )
     depths.append(depth)
@@ -309,7 +309,7 @@ try:
         plt.close(fig4)
 
     with col4:
-        analytic = hilbert(trace)
+        analytic = scipy.signal.hilbert(trace)
         envelope = np.abs(analytic)
         fig5, ax5 = plt.subplots(figsize=(6, 3))
         ax5.plot(time_axis, envelope)
