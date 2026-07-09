@@ -9,7 +9,7 @@ import io
 # 1. ЗАГОЛОВОК СТРАНИЦЫ
 # ============================================================
 st.set_page_config(page_title="Генератор сейсмических трасс", layout="wide")
-st.title("🌍 Генератор синтетических сейсмических трасс")
+st.title("Генератор синтетических сейсмических трасс")
 st.markdown("Настройте параметры геологической модели и получите синтетическую трассу в реальном времени.")
 
 
@@ -334,7 +334,7 @@ class HybridGenerator:
             rc = ReflectionCoefficients(depths, velocities, densities)
             reflectivity = rc.get_reflectivity_series(self.dt, self.total_time)
 
-        # ✅ Используем trace_gen с правильной амплитудой
+        # Используем trace_gen с правильной амплитудой
         trace = self.trace_gen.generate_from_reflectivity(reflectivity)
 
         # Обрезаем до нужной длины
@@ -370,10 +370,10 @@ class HybridGenerator:
 # ============================================================
 st.sidebar.header("⚙️ Параметры модели")
 
-# ✅ ЧЕКБОКСЫ ДЛЯ ГИБРИДНОГО ГЕНЕРАТОРА
-st.sidebar.subheader("🧬 Режимы генерации")
-use_mc = st.sidebar.checkbox("✅ Учитывать неопределённость (Монте-Карло)", value=True)
-use_trends = st.sidebar.checkbox("✅ Учитывать неоднородность слоёв", value=True)
+# ЧЕКБОКСЫ ДЛЯ ГИБРИДНОГО ГЕНЕРАТОРА
+st.sidebar.subheader("Режимы генерации")
+use_mc = st.sidebar.checkbox("Учитывать неопределённость (Монте-Карло)", value=False)
+use_trends = st.sidebar.checkbox("Учитывать неоднородность слоёв", value=False)
 
 # Длина трассы
 trace_length = st.sidebar.slider("Длина трассы (количество отсчетов)", 100, 10000, 2000)
@@ -387,7 +387,7 @@ dt = st.sidebar.number_input("Интервал дискретизации dt (м
 
 # Длительность записи (до 5 секунд)
 total_time = st.sidebar.number_input("Длительность записи (с)",
-                                     min_value=0.5, max_value=5.0, value=2.0)
+                                     min_value=0.5, max_value=5.0, value=5.0)
 
 # Параметры вейвлета
 wavelet_freq = st.sidebar.slider("Частота вейвлета (Гц)", 5, 500, 30)
@@ -401,7 +401,7 @@ amplitude = st.sidebar.slider("Амплитуда", 50, 2500, 1000)
 # ============================================================
 # 5. ГЕОЛОГИЧЕСКАЯ МОДЕЛЬ
 # ============================================================
-st.sidebar.subheader("📊 Геологическая модель")
+st.sidebar.subheader("Геологическая модель")
 
 MAX_DEPTH = 12000
 
@@ -505,7 +505,7 @@ try:
         dt=dt,
         total_time=total_time,
         noise_level=noise_std,
-        amplitude=amplitude  # ✅ Передаём амплитуду
+        amplitude=amplitude  # Передаём амплитуду
     )
 
     # Создаём распределения для Монте-Карло
@@ -530,7 +530,7 @@ try:
     # ✅ НЕ обрезаем трассу, а используем как есть
     # Если нужно изменить длину - делаем интерполяцию или ресэмплинг
 
-    st.header("📈 Результат генерации")
+    st.header("Результат генерации")
     st.info(f"Режим: **{mode}** | Длина трассы: {len(trace)} отсчетов | Время записи: {time_axis[-1]:.2f} с")
 
     # Основной график
@@ -580,7 +580,7 @@ try:
         plt.close(fig3)
 
     # Спектр
-    st.subheader("📊 Спектральный анализ")
+    st.subheader("Спектральный анализ")
     col3, col4 = st.columns(2)
 
     with col3:
@@ -609,7 +609,7 @@ try:
         plt.close(fig5)
 
     # Таблицы
-    st.header("📋 Параметры модели")
+    st.header("Параметры модели")
 
     model_data = []
     for i in range(len(result['depths']) + 1):
