@@ -40,10 +40,11 @@ class RickerWaveletGenerator:
 class ReflectionCoefficients:
     """Расчёт коэффициентов отражения."""
 
-    def __init__(self, depths, velocities, densities):
+    def __init__(self, depths, velocities, densities, angle=0):
         self.depths = np.array(depths)
         self.velocities = np.array(velocities)
         self.densities = np.array(densities)
+        self.angle = np.radians(angle)  # угол в радианах
         self.impedances = self.densities * self.velocities
         self.reflection_coeffs, self.two_way_times = self._compute_reflection()
 
@@ -51,6 +52,8 @@ class ReflectionCoefficients:
         R = []
         times = []
         cumulative = 0.0
+        cos_angle = np.cos(self.angle)
+
         for i in range(len(self.depths)):
             Z_upper = self.impedances[i]
             Z_lower = self.impedances[i + 1]
@@ -60,7 +63,8 @@ class ReflectionCoefficients:
                 thickness = self.depths[0]
             else:
                 thickness = self.depths[i] - self.depths[i - 1]
-            cumulative += 2 * thickness / self.velocities[i]
+            # Время с учётом угла наклона (увеличение пути)
+            cumulative += 2 * thickness / (self.velocities[i] * cos_angle)
             times.append(cumulative)
         return np.array(R), np.array(times)
 
@@ -105,8 +109,8 @@ class SeismicTraceGenerator:
 
         return trace
 
-    def generate_from_model(self, depths, velocities, densities, total_time, trace_length=None):
-        rc = ReflectionCoefficients(depths, velocities, densities)
+    def generate_from_model(self, depths, velocities, densities, total_time, angle=0, trace_length=None):
+        rc = ReflectionCoefficients(depths, velocities, densities, angle)
         reflectivity = rc.get_reflectivity_series(self.dt, total_time)
 
         time_axis = np.arange(0, total_time + self.dt, self.dt)
@@ -127,7 +131,7 @@ class SeismicTraceGenerator:
 
 
 # ============================================================
-# 3. ГИБРИДНЫЙ ГЕНЕРАТОР (ИСПРАВЛЕННЫЙ)
+# 3. ГИБРИДНЫЙ ГЕНЕРАТОР
 # ============================================================
 
 class HybridGenerator:
@@ -238,9 +242,11 @@ class HybridGenerator:
 
         return np.array(depths), np.array(velocities), np.array(densities)
 
-    def _compute_reflectivity_with_trends(self, depths, velocities, densities, layer_trends):
+    def _compute_reflectivity_with_trends(self, depths, velocities, densities, layer_trends, angle=0):
         """Расчёт коэффициентов отражения с учётом микрослоистости внутри КАЖДОГО слоя."""
         reflectivity = np.zeros(self.num_samples)
+        angle_rad = np.radians(angle)
+        cos_angle = np.cos(angle_rad)
 
         for i in range(len(depths) + 1):
             if i == 0:
@@ -307,7 +313,7 @@ class HybridGenerator:
                     R = np.sign(R) * 0.99
 
                 avg_v = np.mean(V_micro[:j + 2])
-                t = 2 * (z_micro[j + 1] - top) / avg_v + 2 * top / V0
+                t = 2 * (z_micro[j + 1] - top) / (avg_v * cos_angle) + 2 * top / (V0 * cos_angle)
                 idx = int(round(t / self.dt))
                 if idx < self.num_samples:
                     reflectivity[idx] += R
@@ -315,7 +321,7 @@ class HybridGenerator:
         return reflectivity
 
     def generate_trace(self, distributions, layer_trends,
-                       use_mc=True, use_trends=True,
+                       use_mc=True, use_trends=True, angle=0,
                        seed=None, verbose=False):
         """Генерация одной трассы с учётом обоих эффектов."""
         if seed is not None:
@@ -328,16 +334,14 @@ class HybridGenerator:
 
         if use_trends:
             reflectivity = self._compute_reflectivity_with_trends(
-                depths, velocities, densities, layer_trends
+                depths, velocities, densities, layer_trends, angle
             )
         else:
-            rc = ReflectionCoefficients(depths, velocities, densities)
+            rc = ReflectionCoefficients(depths, velocities, densities, angle)
             reflectivity = rc.get_reflectivity_series(self.dt, self.total_time)
 
-        # Используем trace_gen с правильной амплитудой
         trace = self.trace_gen.generate_from_reflectivity(reflectivity)
 
-        # Обрезаем до нужной длины
         if len(trace) > self.num_samples:
             trace = trace[:self.num_samples]
         elif len(trace) < self.num_samples:
@@ -375,28 +379,35 @@ st.sidebar.subheader("Режимы генерации")
 use_mc = st.sidebar.checkbox("Учитывать неопределённость (Монте-Карло)", value=False)
 use_trends = st.sidebar.checkbox("Учитывать неоднородность слоёв", value=False)
 
-# Длина трассы
-trace_length = st.sidebar.slider("Длина трассы (количество отсчетов)", 100, 10000, 2000)
-
+# Длина трассы - теперь вычисляется автоматически
 # Количество горизонтов
 num_horizons = st.sidebar.slider("Количество отражающих горизонтов", 1, 20, 3)
 
-# Параметры дискретизации
-dt = st.sidebar.number_input("Интервал дискретизации dt (мс)",
-                             min_value=1.0, max_value=4.0, value=1.0) / 1000
+# Параметры дискретизации - выбор из стандартных значений
+dt_options = [0.5, 1.0, 2.0, 4.0]
+dt_ms = st.sidebar.selectbox("Интервал дискретизации dt (мс)", dt_options, index=1)
+dt = dt_ms / 1000
 
 # Длительность записи (до 5 секунд)
 total_time = st.sidebar.number_input("Длительность записи (с)",
-                                     min_value=0.5, max_value=5.0, value=5.0)
+                                     min_value=0.5, max_value=5.0, value=5.0, step=0.5)
+
+# Автоматический расчёт количества отсчётов
+num_samples_auto = int(total_time / dt) + 1
+st.sidebar.info(f"Количество отсчетов: {num_samples_auto} (рассчитано автоматически)")
+
+# Угол наклона слоёв
+angle = st.sidebar.slider("Угол наклона слоёв (градусы)", 0, 60, 0, 1,
+                          help="Угол наклона отражающих границ. 0° — горизонтальные слои.")
 
 # Параметры вейвлета
 wavelet_freq = st.sidebar.slider("Частота вейвлета (Гц)", 5, 500, 30)
 
 # Уровень шума
-noise_std = st.sidebar.slider("Уровень шума", 0.0, 1.0, 0.05)
+noise_std = st.sidebar.slider("Уровень шума", 0.0, 1.0, 0.05, 0.01)
 
 # Амплитуда
-amplitude = st.sidebar.slider("Амплитуда", 50, 2500, 1000)
+amplitude = st.sidebar.slider("Амплитуда", 50, 2500, 1000, 50)
 
 # ============================================================
 # 5. ГЕОЛОГИЧЕСКАЯ МОДЕЛЬ
@@ -439,11 +450,11 @@ densities = []
 # Слой 0
 velocities.append(st.sidebar.number_input(
     "Скорость слоя 0 (м/с)",
-    min_value=500, max_value=6000, value=default_velocities[0]
+    min_value=500, max_value=6000, value=default_velocities[0], step=50
 ))
 densities.append(st.sidebar.number_input(
     "Плотность слоя 0 (кг/м³)",
-    min_value=1500, max_value=3500, value=default_densities[0]
+    min_value=1500, max_value=3500, value=default_densities[0], step=50
 ))
 
 # Горизонты и слои
@@ -456,42 +467,45 @@ for i in range(num_horizons):
     depth = st.sidebar.number_input(
         f"Глубина {i + 1} (м)",
         min_value=100, max_value=MAX_DEPTH,
-        value=depth_val
+        value=depth_val, step=50
     )
     depths.append(depth)
 
     v_val = default_velocities[i + 1] if i + 1 < len(default_velocities) else 2000 + (i + 1) * 300
     v = st.sidebar.number_input(
         f"Скорость слоя {i + 1} (м/с)",
-        min_value=500, max_value=6000, value=v_val
+        min_value=500, max_value=6000, value=v_val, step=50
     )
     velocities.append(v)
 
     rho_val = default_densities[i + 1] if i + 1 < len(default_densities) else 2200 + i * 100
     rho = st.sidebar.number_input(
         f"Плотность слоя {i + 1} (кг/м³)",
-        min_value=1500, max_value=3500, value=rho_val
+        min_value=1500, max_value=3500, value=rho_val, step=50
     )
     densities.append(rho)
 
-    # Тренды для каждого слоя
-    st.sidebar.markdown(f"**Тренд слоя {i + 1}**")
-    trend_type = st.sidebar.selectbox(
-        f"Тип тренда {i + 1}",
-        ['none', 'linear', 'sinusoidal', 'random'],
-        index=0,
-        key=f"trend_{i}"
-    )
-    if trend_type != 'none':
-        trend_params = {}
-        if trend_type == 'linear':
-            trend_params['k'] = st.sidebar.number_input(f"Градиент k {i + 1}", 10, 500, 100, key=f"k_{i}")
-        elif trend_type == 'sinusoidal':
-            trend_params['A'] = st.sidebar.number_input(f"Амплитуда A {i + 1}", 10, 500, 150, key=f"A_{i}")
-            trend_params['L'] = st.sidebar.number_input(f"Период L {i + 1}", 10, 200, 50, key=f"L_{i}")
-        elif trend_type == 'random':
-            trend_params['sigma'] = st.sidebar.number_input(f"Sigma {i + 1}", 10, 200, 50, key=f"sigma_{i}")
-        layer_trends.append({'type': trend_type, **trend_params})
+    # Тренды для каждого слоя (только если включен режим микрослоистости)
+    if use_trends:
+        st.sidebar.markdown(f"**Тренд слоя {i + 1}**")
+        trend_type = st.sidebar.selectbox(
+            f"Тип тренда {i + 1}",
+            ['none', 'linear', 'sinusoidal', 'random'],
+            index=0,
+            key=f"trend_{i}"
+        )
+        if trend_type != 'none':
+            trend_params = {}
+            if trend_type == 'linear':
+                trend_params['k'] = st.sidebar.number_input(f"Градиент k {i + 1}", 10, 500, 100, key=f"k_{i}")
+            elif trend_type == 'sinusoidal':
+                trend_params['A'] = st.sidebar.number_input(f"Амплитуда A {i + 1}", 10, 500, 150, key=f"A_{i}")
+                trend_params['L'] = st.sidebar.number_input(f"Период L {i + 1}", 10, 200, 50, key=f"L_{i}")
+            elif trend_type == 'random':
+                trend_params['sigma'] = st.sidebar.number_input(f"Sigma {i + 1}", 10, 200, 50, key=f"sigma_{i}")
+            layer_trends.append({'type': trend_type, **trend_params})
+        else:
+            layer_trends.append({'type': 'none'})
     else:
         layer_trends.append({'type': 'none'})
 
@@ -505,7 +519,7 @@ try:
         dt=dt,
         total_time=total_time,
         noise_level=noise_std,
-        amplitude=amplitude  # Передаём амплитуду
+        amplitude=amplitude
     )
 
     # Создаём распределения для Монте-Карло
@@ -520,6 +534,7 @@ try:
         distributions, layer_trends,
         use_mc=use_mc,
         use_trends=use_trends,
+        angle=angle,
         seed=42
     )
 
@@ -527,18 +542,16 @@ try:
     time_axis = result['time_axis']
     mode = result['mode']
 
-    # ✅ НЕ обрезаем трассу, а используем как есть
-    # Если нужно изменить длину - делаем интерполяцию или ресэмплинг
-
     st.header("Результат генерации")
-    st.info(f"Режим: **{mode}** | Длина трассы: {len(trace)} отсчетов | Время записи: {time_axis[-1]:.2f} с")
+    st.info(
+        f"Режим: **{mode}** | Длина трассы: {len(trace)} отсчетов | Время записи: {time_axis[-1]:.2f} с | Угол наклона: {angle}°")
 
     # Основной график
     fig, ax = plt.subplots(figsize=(12, 6))
     ax.plot(time_axis, trace, 'b-', linewidth=1.5, label='Синтетическая трасса')
 
     # Отмечаем горизонты
-    rc = ReflectionCoefficients(result['depths'], result['velocities'], result['densities'])
+    rc = ReflectionCoefficients(result['depths'], result['velocities'], result['densities'], angle)
     for i, t in enumerate(rc.two_way_times):
         if t < time_axis[-1]:
             ax.axvline(x=t, color='red', linestyle='--', alpha=0.7,
