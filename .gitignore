@@ -2,3 +2,5 @@
 *.docx
 *.venv
 *.obsidian
+.env
+.streamlit/secrets.toml
