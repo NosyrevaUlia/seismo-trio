@@ -1,0 +1,1504 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import lasio
+import io
+import copy
+from scipy.interpolate import interp1d
+import zipfile
+import plotly.graph_objects as go
+
+# === БЛОК НЕЙРОСЕТИ CVAE И ЗАГРУЗКИ ВЕСОВ ===
+import torch
+import torch.nn as nn
+from scipy.ndimage import gaussian_filter1d
+
+class GeologicalCVAE(nn.Module):
+    def __init__(self, input_dim, latent_dim=4):
+        super(GeologicalCVAE, self).__init__()
+        self.input_dim = input_dim
+        self.latent_dim = latent_dim
+        
+        self.decoder = nn.Sequential(
+            nn.Linear(latent_dim, 32),
+            nn.LeakyReLU(0.2),
+            nn.Linear(32, 64),
+            nn.LeakyReLU(0.2),
+            nn.Linear(64, input_dim * 2),
+            nn.Tanh()
+        )
+
+    def decode(self, z):
+        recon = self.decoder(z)
+        return recon.view(-1, 2, self.input_dim)
+
+@st.cache_resource
+def load_cvae(weights_path="cvae_weights.pt"):
+    try:
+        ckpt = torch.load(weights_path, map_location=torch.device('cpu'), weights_only=False)
+        net = GeologicalCVAE(input_dim=ckpt['input_dim'], latent_dim=4)
+        net.load_state_dict(ckpt['model_state'], strict=False)
+        net.eval()
+        return net, ckpt
+    except Exception:
+        return None, None
+# ============================================
+
+# === НАЧАЛО: МАТЕМАТИЧЕСКИЕ ФУНКЦИИ ===
+def resample_curve(curve_series, target_length):
+    x_old = np.linspace(0, 1, num=len(curve_series))
+    x_new = np.linspace(0, 1, num=target_length)
+    f = interp1d(x_old, curve_series, kind='linear', fill_value="extrapolate")
+    return pd.Series(f(x_new))
+
+def resample_curve_on_depth(depth_src, curve_src, depth_target):
+    mask = (~np.isnan(curve_src)) & (np.array(curve_src, dtype=float) > -900)
+    d_clean = np.array(depth_src, dtype=float)[mask]
+    c_clean = np.array(curve_src, dtype=float)[mask]
+    if len(d_clean) < 2:
+        return np.full_like(depth_target, np.nan)
+    f = interp1d(d_clean, c_clean, kind='linear', bounds_error=False, fill_value="extrapolate")
+    return f(depth_target)
+
+def morph_wells(well_a, well_b, weight):
+    max_len = max(len(well_a), len(well_b))
+    a_resamp = resample_curve(well_a, max_len) if len(well_a) < max_len else well_a.reset_index(drop=True)
+    b_resamp = resample_curve(well_b, max_len) if len(well_b) < max_len else well_b.reset_index(drop=True)
+    synthetic_base = a_resamp * (1 - weight) + b_resamp * weight
+    return synthetic_base
+
+def compute_idw_weights(wells, target_x, target_y):
+    distances = []
+    for w in wells:
+        d = np.sqrt((w['x'] - target_x)**2 + (w['y'] - target_y)**2)
+        distances.append(max(d, 0.001))
+    inv_d = [1.0 / (d**1.5) for d in distances]
+    total_inv = sum(inv_d)
+    return [w / total_inv for w in inv_d]
+
+def find_curve_idw_column(df_columns, targets):
+    for col in df_columns:
+        c_clean = str(col).strip().upper()
+        if c_clean in targets:
+            return col
+    for col in df_columns:
+        c_clean = str(col).strip().upper()
+        if any(t in c_clean for t in targets):
+            return col
+    return None
+
+def extract_idw_well_info(uploaded_file, default_idx=0):
+    raw_bytes = uploaded_file.getvalue()
+    text = None
+    for enc in ['utf-8', 'windows-1251', 'cp1251', 'latin-1']:
+        try:
+            text = raw_bytes.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    if text is None:
+        raise ValueError(f"Не удалось декодировать файл {uploaded_file.name}")
+
+    las = lasio.read(io.StringIO(text))
+    df = las.df().reset_index()
+    if df is None or len(df) == 0:
+        raise ValueError(f"Файл {uploaded_file.name} не содержит каротажных данных")
+
+    depth_col = None
+    targets_depth = ['DEPT', 'DEPTH', 'GLUB', 'ГЛУБИНА', 'ГЛУБ']
+    for t in targets_depth:
+        for c in df.columns:
+            if t in str(c).upper():
+                depth_col = c
+                break
+        if depth_col: break
+    if depth_col is None:
+        depth_col = df.columns[0]
+
+    x, y = 0.0, 0.0
+    for key in ['X', 'X_COORD', 'EASTING', 'XCOORD', 'X_LOC']:
+        if key in las.well:
+            try:
+                x = float(str(las.well[key].value).replace(',', '.'))
+                break
+            except Exception: pass
+    for key in ['Y', 'Y_COORD', 'NORTHING', 'YCOORD', 'Y_LOC']:
+        if key in las.well:
+            try:
+                y = float(str(las.well[key].value).replace(',', '.'))
+                break
+            except Exception: pass
+    if x == 0.0 and y == 0.0:
+        x = float((default_idx + 1) * 450.0)
+        y = float(200.0 + (default_idx % 2) * 350.0)
+
+    ps_targets = ['PS', 'SP', 'SPC', 'ПС', 'SP_1', 'CPS', 'SP_ED']
+    gk_targets = ['GK', 'GR', 'GAMMA', 'ГК', 'GR_1', 'CGR', 'GAM', 'GR_ED']
+    res_targets = ['RES', 'BK', 'RT', 'БК']
+    cond_targets = ['COND', 'IK', 'ИК']
+    nphi_targets = ['NPHI', 'NKT', 'NK', 'НКТ']
+    gmz_targets = ['GMZ', 'PMZ', 'MKZ', 'МКЗ']
+
+    curve_map = {
+        'GK': find_curve_idw_column(df.columns, gk_targets),
+        'SP': find_curve_idw_column(df.columns, ps_targets),
+        'RES': find_curve_idw_column(df.columns, res_targets),
+        'COND': find_curve_idw_column(df.columns, cond_targets),
+        'NPHI': find_curve_idw_column(df.columns, nphi_targets),
+        'GMZ': find_curve_idw_column(df.columns, gmz_targets),
+    }
+    return {
+        'name': uploaded_file.name,
+        'las': las,
+        'df': df,
+        'depth_col': depth_col,
+        'x': x,
+        'y': y,
+        'curves': curve_map,
+        'all_curves': list(df.columns)
+    }
+# === КОНЕЦ: МАТЕМАТИЧЕСКИЕ ФУНКЦИИ ===
+
+# === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (ГЛОБАЛЬНАЯ ОБЛАСТЬ) ===
+
+def decode_file_content(bytes_data):
+    for encoding in ['utf-8', 'cp1251', 'latin-1']:
+        try: return bytes_data.decode(encoding)
+        except UnicodeDecodeError: continue
+    raise UnicodeDecodeError("Ошибка декодирования")
+
+def find_depth_column(cols):
+    targets = ['DEPT', 'DEPTH', 'GLUB', 'ГЛУБИНА', 'ГЛУБ']
+    for t in targets:
+        for c in cols:
+            if t in c.upper():
+                return c
+    return cols[0]
+
+def find_best_mnemonic(targets, options):
+    for target in targets:
+        for i, opt in enumerate(options):
+            if target.upper() == opt.upper() or opt.upper().startswith(target.upper()):
+                return i + 1
+    return 0
+
+def calculate_cv_stats(series):
+    if series.empty or series.isna().all(): return 0, 0, 0
+    mu = float(series.mean())
+    sigma = float(series.std())
+    cv = sigma / abs(mu) if mu != 0 else 0
+    return mu, sigma, cv
+
+def calculate_hellinger_distance(p, q, bins=50):
+    p = p[~np.isnan(p)]
+    q = q[~np.isnan(q)]
+    if len(p) == 0 or len(q) == 0: return 1.0
+    min_val = min(np.min(p), np.min(q))
+    max_val = max(np.max(p), np.max(q))
+    hist_p, _ = np.histogram(p, bins=bins, range=(min_val, max_val), density=True)
+    hist_q, _ = np.histogram(q, bins=bins, range=(min_val, max_val), density=True)
+    hist_p = hist_p / np.sum(hist_p) if np.sum(hist_p) > 0 else hist_p
+    hist_q = hist_q / np.sum(hist_q) if np.sum(hist_q) > 0 else hist_q
+    h_dist = np.sqrt(np.sum((np.sqrt(hist_p) - np.sqrt(hist_q)) ** 2)) / np.sqrt(2)
+    return float(h_dist)
+
+def generate_cv_synthetic(original_series, cv_multiplier, curve_type=None, saturation="Вода (База)", apply_fluid_effect=False, add_artifacts=False, noise_scale=1.0):
+    mu, sigma, cv = calculate_cv_stats(original_series)
+    window = max(5, len(original_series)//10)
+    trend = original_series.rolling(window=window, center=True, min_periods=1).mean()
+    new_sigma = cv * cv_multiplier * abs(mu) * noise_scale
+    noise = np.random.normal(0, new_sigma, size=len(original_series))
+    
+    if curve_type in ['SP', 'PS']:
+        noise = noise * 0.3
+    
+    synth = trend + noise
+    
+    if curve_type in ['SP', 'PS']:
+        synth = pd.Series(synth).rolling(window=3, center=True, min_periods=1).mean().values
+        
+    if apply_fluid_effect:
+        if saturation == "Нефть":
+            if curve_type in ['RES', 'BK', 'GMZ', 'PMZ']:
+                synth = synth * 4.0
+            elif curve_type in ['COND', 'IK']:
+                synth = synth / 4.0
+        elif saturation == "Газ":
+            if curve_type in ['RES', 'BK', 'GMZ', 'PMZ']:
+                synth = synth * 10.0
+            elif curve_type in ['COND', 'IK']:
+                synth = synth / 10.0
+            elif curve_type in ['NPHI', 'NKT', 'NK']:
+                synth = np.clip(synth - 0.08, -0.02, 1.0)
+                
+    if add_artifacts:
+        synth_arr = np.array(synth, dtype=float)
+        n_points = len(synth_arr)
+        missing_mask = np.random.rand(n_points) < 0.05
+        synth_arr[missing_mask] = np.nan
+        spike_mask = (np.random.rand(n_points) < 0.01) & (~np.isnan(synth_arr))
+        spikes = np.random.choice([1, -1], size=np.sum(spike_mask)) * 3 * sigma
+        synth_arr[spike_mask] = synth_arr[spike_mask] + spikes
+        synth = synth_arr
+        
+    return synth
+
+def generate_dummy_data():
+    depth = np.arange(2000, 2500, 0.1)
+    gk = 50 + 30 * np.sin(depth * 0.05) + np.random.normal(0, 5, len(depth))
+    sp = -20 + 40 * np.cos(depth * 0.03) + np.random.normal(0, 3, len(depth))
+    res = 10 ** (np.sin(depth * 0.02) + 1 + np.random.normal(0, 0.1, len(depth)))
+    dt = 200 + 50 * np.sin(depth * 0.04) + np.random.normal(0, 10, len(depth))
+    return pd.DataFrame({'DEPTH': depth, 'GK': gk, 'SP': sp, 'RES': res, 'DT': dt})
+
+def get_las_binary(original_las, synthetic_df, depth_col, well_x=None, well_y=None, well_name="Synthetic_Well_01"):
+    if original_las is not None:
+        new_las = copy.deepcopy(original_las)
+        if 'WELL' in new_las.well: new_las.well.WELL.value = well_name
+        if 'COMP' in new_las.well: new_las.well.COMP.value = "Edu_Project_University"
+        if 'FLD' in new_las.well: new_las.well.FLD.value = "Virtual_Field"
+        if 'LOC' in new_las.well: new_las.well.LOC.value = "Classroom"
+        if 'DATE' in new_las.well: new_las.well.DATE.value = "2026-01-01"
+        if well_x is not None and 'X' in new_las.well: new_las.well.X.value = f"{well_x}"
+        if well_y is not None and 'Y' in new_las.well: new_las.well.Y.value = f"{well_y}"
+    else:
+        new_las = lasio.LASFile()
+        new_las.well.WELL = well_name
+        new_las.well.COMP = "Edu_Project_University"
+        new_las.well.FLD = "Virtual_Field"
+        new_las.well.LOC = "Classroom"
+        new_las.well.DATE = "2026-01-01"
+        if well_x is not None:
+            try: new_las.well['X'] = lasio.HeaderItem('X', value=str(well_x), descr='X Coordinate')
+            except Exception: pass
+        if well_y is not None:
+            try: new_las.well['Y'] = lasio.HeaderItem('Y', value=str(well_y), descr='Y Coordinate')
+            except Exception: pass
+
+    new_las.curves.clear()
+    new_las.insert_curve(0, depth_col, synthetic_df[depth_col].values, unit='m', descr='DEPTH')
+    for col in synthetic_df.columns:
+        if col != depth_col:
+            descr = ''
+            unit = ''
+            if original_las is not None and col in original_las.keys():
+                descr = original_las.curves[col].descr
+                unit = original_las.curves[col].unit
+            new_las.append_curve(col, synthetic_df[col].values, unit=unit, descr=descr)
+
+    text_buf = io.StringIO()
+    try:
+        new_las.write(text_buf, version=2.0)
+    except TypeError:
+        new_las.write(text_buf)
+    string_data = text_buf.getvalue()
+    return string_data.encode('utf-8')
+
+def plot_log_comparison(df_orig, df_synth, depth_col, curves_map, mode, saturation="Вода (База)", apply_fluid_effect=False, plot_width=10, plot_height=8, show_grid=True):
+    plt.style.use('dark_background')
+    fig_bg = '#1F262F'
+    ax_bg = '#161B22'
+    text_color = '#94A3B8'
+    spine_color = '#2D333B'
+    
+    if mode == "Глинистость (ГК)":
+        fig, axes = plt.subplots(1, 2, figsize=(plot_width, plot_height), sharey=True)
+        c_name = curves_map.get('GK')
+        color = '#3B82F6'
+        for i, (df, label) in enumerate([(df_orig, 'ИСХОДНЫЕ ДАННЫЕ'), (df_synth, 'СИНТЕТИКА (РЕЗУЛЬТАТ)')]):
+            if c_name and c_name in df.columns:
+                axes[i].plot(df[c_name], df[depth_col], color=color, lw=1.5)
+                axes[i].fill_betweenx(df[depth_col], df[c_name].min(), df[c_name], color=color, alpha=0.15)
+            axes[i].set_title(f"{label}", fontsize=11, fontweight='bold', color=text_color)
+            axes[i].set_xlabel("Гамма-каротаж (мкР/ч)", fontsize=9, fontweight='bold', color=text_color)
+            axes[i].set_xlim(0, 150)
+            
+    elif mode == "Потенциал (ПС)":
+        fig, axes = plt.subplots(1, 2, figsize=(plot_width, plot_height), sharey=True)
+        c_name = curves_map.get('SP')
+        color = '#8B5CF6'
+        for i, (df, label) in enumerate([(df_orig, 'ИСХОДНЫЕ ДАННЫЕ'), (df_synth, 'СИНТЕТИКА (РЕЗУЛЬТАТ)')]):
+            if c_name and c_name in df.columns:
+                axes[i].plot(df[c_name], df[depth_col], color=color, lw=1.5)
+                axes[i].fill_betweenx(df[depth_col], df[c_name].min(), df[c_name], color=color, alpha=0.15)
+            axes[i].set_title(f"{label}", fontsize=11, fontweight='bold', color=text_color)
+            axes[i].set_xlabel("ПС (мВ)", fontsize=9, fontweight='bold', color=text_color)
+            
+    elif mode == "Сопротивление (БК)":
+        fig, axes = plt.subplots(1, 2, figsize=(plot_width, plot_height), sharey=True)
+        res_name = curves_map.get('RES')
+        if res_name and res_name in df_synth.columns and res_name in df_orig.columns:
+            axes[0].semilogx(df_orig[res_name], df_orig[depth_col], color=text_color, lw=1.5, label='Исходное (Вода)')
+            axes[0].set_title("ИСХОДНЫЕ ДАННЫЕ", fontsize=11, fontweight='bold', color=text_color)
+            axes[0].set_xlabel("Уд. Сопротивление (Ом·м)", fontsize=9, fontweight='bold', color=text_color)
+            axes[0].legend(fontsize=8, loc='upper right')
+            
+            axes[1].semilogx(df_orig[res_name], df_orig[depth_col], color=text_color, lw=1, alpha=0.6, label='Исходное (Ref)')
+            axes[1].semilogx(df_synth[res_name], df_synth[depth_col], color='#EF4444', lw=1.8, label='Синтетика (Результат)')
+            if apply_fluid_effect and saturation != "Вода (База)":
+                axes[1].fill_betweenx(df_synth[depth_col], df_orig[res_name], df_synth[res_name], 
+                                    where=(df_synth[res_name] >= df_orig[res_name]),
+                                    color='gold', alpha=0.5, label='Продуктивная зона (Нефть/Газ)')
+            axes[1].set_title("СИНТЕТИКА", fontsize=11, fontweight='bold', color=text_color)
+            axes[1].set_xlabel("Уд. Сопротивление (Ом·м)", fontsize=9, fontweight='bold', color=text_color)
+            axes[1].legend(fontsize=8, loc='upper right')
+            
+    elif mode == "Микрозонды (МКЗ)":
+        fig, axes = plt.subplots(1, 2, figsize=(plot_width, plot_height), sharey=True)
+        c_name = curves_map.get('GMZ')
+        if c_name and c_name in df_synth.columns and c_name in df_orig.columns:
+            axes[0].semilogx(df_orig[c_name], df_orig[depth_col], color=text_color, lw=1.5, label='Исходное (Вода)')
+            axes[0].set_title("ИСХОДНЫЕ ДАННЫЕ", fontsize=11, fontweight='bold', color=text_color)
+            axes[0].set_xlabel("Уд. Сопротивление (Ом·м)", fontsize=9, fontweight='bold', color=text_color)
+            axes[0].legend(fontsize=8, loc='upper right')
+            
+            axes[1].semilogx(df_orig[c_name], df_orig[depth_col], color=text_color, lw=1, alpha=0.6, label='Исходное (Ref)')
+            axes[1].semilogx(df_synth[c_name], df_synth[depth_col], color='#EF4444', lw=1.8, label='Синтетика (Результат)')
+            if apply_fluid_effect and saturation != "Вода (База)":
+                axes[1].fill_betweenx(df_synth[depth_col], df_orig[c_name], df_synth[c_name], 
+                                    where=(df_synth[c_name] >= df_orig[c_name]),
+                                    color='gold', alpha=0.5, label='Продуктивная зона (Нефть/Газ)')
+            axes[1].set_title("СИНТЕТИКА", fontsize=11, fontweight='bold', color=text_color)
+            axes[1].set_xlabel("Уд. Сопротивление (Ом·м)", fontsize=9, fontweight='bold', color=text_color)
+            axes[1].legend(fontsize=8, loc='upper right')
+            
+    elif mode == "Проводимость (ИК)":
+        fig, axes = plt.subplots(1, 2, figsize=(plot_width, plot_height), sharey=True)
+        c_name = curves_map.get('COND')
+        color = '#F59E0B'
+        if c_name and c_name in df_synth.columns and c_name in df_orig.columns:
+            axes[0].semilogx(df_orig[c_name], df_orig[depth_col], color=text_color, lw=1.5, label='Исходное (Вода)')
+            axes[0].set_title("ИСХОДНЫЕ ДАННЫЕ", fontsize=11, fontweight='bold', color=text_color)
+            axes[0].set_xlabel("Проводимость (мСм/м)", fontsize=9, fontweight='bold', color=text_color)
+            axes[0].legend(fontsize=8, loc='upper right')
+            
+            axes[1].semilogx(df_orig[c_name], df_orig[depth_col], color=text_color, lw=1, alpha=0.6, label='Исходное (Ref)')
+            axes[1].semilogx(df_synth[c_name], df_synth[depth_col], color=color, lw=1.8, label='Синтетика (Результат)')
+            if apply_fluid_effect and saturation != "Вода (База)":
+                axes[1].fill_betweenx(df_synth[depth_col], df_orig[c_name], df_synth[c_name], 
+                                    where=(df_synth[c_name] <= df_orig[c_name]),
+                                    color='gold', alpha=0.5, label='Падение проводимости (Нефть/Газ)')
+            axes[1].set_title("СИНТЕТИКА", fontsize=11, fontweight='bold', color=text_color)
+            axes[1].set_xlabel("Проводимость (мСм/м)", fontsize=9, fontweight='bold', color=text_color)
+            axes[1].legend(fontsize=8, loc='upper right')
+            
+    elif mode == "Нейтронная пористость (НКТ)":
+        fig, axes = plt.subplots(1, 2, figsize=(plot_width, plot_height), sharey=True)
+        c_name = curves_map.get('NPHI')
+        color = '#10B981'
+        for i, (df, label) in enumerate([(df_orig, 'ИСХОДНЫЕ ДАННЫЕ'), (df_synth, 'СИНТЕТИКА (РЕЗУЛЬТАТ)')]):
+            if c_name and c_name in df.columns:
+                axes[i].plot(df[c_name], df[depth_col], color=color, lw=1.5)
+                axes[i].fill_betweenx(df[depth_col], df[c_name].min(), df[c_name], color=color, alpha=0.15)
+            axes[i].set_title(f"{label}", fontsize=11, fontweight='bold', color=text_color)
+            axes[i].set_xlabel("НКТ (д.е.)", fontsize=9, fontweight='bold', color=text_color)
+
+    for ax in axes:
+        ax.invert_yaxis()
+        if show_grid:
+            ax.grid(True, alpha=0.2, linestyle='--')
+        else:
+            ax.grid(False)
+        ax.tick_params(labelsize=9, colors=text_color)
+        ax.set_facecolor(ax_bg)
+        for spine in ax.spines.values():
+            spine.set_color(spine_color)
+    
+    axes[0].set_ylabel("ГЛУБИНА (М)", fontsize=10, fontweight='bold', color=text_color)
+    fig.patch.set_facecolor(fig_bg)
+    plt.subplots_adjust(wspace=0.12)
+    return fig
+
+def plot_distribution_comparison(df_orig, df_synth, c_name):
+    plt.style.use('dark_background')
+    fig_bg = '#1F262F'
+    ax_bg = '#161B22'
+    text_color = '#94A3B8'
+    spine_color = '#2D333B'
+        
+    fig, ax = plt.subplots(figsize=(6, 3))
+    orig_data = df_orig[c_name].dropna()
+    synth_data = df_synth[c_name].dropna()
+    
+    is_log = c_name in ['RES', 'COND', 'BK', 'IK', 'GMZ', 'PMZ']
+    if is_log:
+        orig_data = np.log10(orig_data[orig_data > 0])
+        synth_data = np.log10(synth_data[synth_data > 0])
+        ax.set_xlabel("Log10(Амплитуда)", fontsize=8, color=text_color)
+    else:
+        ax.set_xlabel("Амплитуда", fontsize=8, color=text_color)
+
+    ax.hist(orig_data, bins=40, alpha=0.5, color=text_color, label='Исходник', density=True)
+    ax.hist(synth_data, bins=40, alpha=0.5, color='#EF4444', label='Синтетика', density=True)
+    
+    ax.set_ylabel("Плотность", fontsize=8, color=text_color)
+    ax.tick_params(labelsize=8, colors=text_color)
+    ax.legend(fontsize=8, loc='upper right')
+    ax.set_facecolor(ax_bg)
+    fig.patch.set_facecolor(fig_bg)
+    for spine in ax.spines.values():
+        spine.set_color(spine_color)
+    
+    plt.tight_layout()
+    return fig
+
+# --- КОНФИГУРАЦИЯ СТРАНИЦЫ ---
+st.set_page_config(
+    page_title="GeoSynth Professional",
+    page_icon="🧬",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+# --- БЛОК НАСТРОЕК ВНЕШНЕГО ВИДА ---
+st.sidebar.markdown("#### 🎨 Внешний вид")
+with st.sidebar.expander("Масштаб графиков", expanded=False):
+    plot_width = st.slider("Ширина графика", min_value=6, max_value=20, value=10, step=1)
+    plot_height = st.slider("Высота графика", min_value=4, max_value=20, value=8, step=1)
+    show_grid = st.checkbox("Показывать сетку", value=True)
+    app_mode = st.sidebar.radio("Режим работы GeoSynth:", 
+                            ["Генерация клонов (1 скважина)", "Морфинг фаций (2 скважины)", "Пространственная интерполяция (IDW)"])
+
+# --- ЕДИНАЯ CSS СТИЛИЗАЦИЯ (Modern Dark Dashboard) ---
+st.markdown("""
+    <style>
+    @import url('https://fonts.cdnfonts.com/css/akrobat');
+    
+    html, body, [data-testid="stAppViewContainer"] {
+        font-family: 'Akrobat', sans-serif;
+        background-color: #0F1116;
+        color: #E2E8F0;
+    }
+    
+    [data-testid="stSidebar"], section[data-testid="stSidebar"], .stSidebar {
+        background-color: #161B22 !important;
+        border-right: 1px solid #2D333B !important;
+        width: 380px !important;
+        min-width: 380px !important;
+        max-width: 380px !important;
+        flex: 0 0 380px !important;
+        transform: none !important;
+        translate: none !important;
+        visibility: visible !important;
+        display: block !important;
+        position: relative !important;
+        z-index: 999 !important;
+        margin-left: 0px !important;
+    }
+
+    button[data-testid="stSidebarCollapseButton"],
+    button[aria-label="Toggle sidebar"],
+    button[aria-label="Collapse sidebar"],
+    button[aria-label="Close sidebar"],
+    section[data-testid="stSidebar"] > div:first-child button[kind="header"],
+    div[data-testid="stSidebarCollapseButton"] {
+        display: none !important;
+        visibility: hidden !important;
+        width: 0px !important;
+        height: 0px !important;
+        opacity: 0 !important;
+        pointer-events: none !important;
+    }
+
+    [data-testid="stSidebarUserContent"] {
+        padding-top: 1rem !important;
+        padding-left: 1rem !important;
+        padding-right: 1rem !important;
+    }
+    
+    h1, h2, h3, .main-title {
+        font-family: 'Akrobat', sans-serif !important;
+        text-transform: none !important;
+        font-weight: 600 !important;
+        color: #E2E8F0 !important;
+    }
+    
+    .sidebar-header {
+        font-size: 1.5rem;
+        font-weight: 700;
+        margin-bottom: 1rem;
+        color: #FFFFFF;
+    }
+
+    .st-emotion-cache-16ids9v, .sidebar-section, div[data-testid="stForm"] {
+        background-color: #1F262F !important;
+        border-radius: 12px !important;
+        border: 1px solid #2D333B !important;
+        padding: 16px !important;
+        margin-bottom: 20px !important;
+    }
+
+    div[data-testid="stFileUploader"] {
+        background-color: #161B22 !important;
+        border: 1px dashed #4B5563 !important;
+        border-radius: 10px !important;
+        padding: 10px !important;
+    }
+    
+    div[data-baseweb="select"], div[data-baseweb="input"], .stNumberInput input {
+        background-color: #161B22 !important;
+        border-radius: 8px !important;
+        border: 1px solid #2D333B !important;
+        color: #FFFFFF !important;
+    }
+
+    [data-testid="stFormSubmitButton"] > button {
+        width: 100% !important;
+        background-color: #3B82F6 !important;
+        color: white !important;
+        font-weight: 700 !important;
+        font-size: 1.1rem !important;
+        text-transform: uppercase !important;
+        letter-spacing: 1px !important;
+        border: none !important;
+        padding: 12px !important;
+        border-radius: 10px !important;
+        transition: all 0.2s ease !important;
+        box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3) !important;
+        margin-top: 10px !important;
+    }
+    
+    [data-testid="stFormSubmitButton"] > button:hover {
+        background-color: #2563EB !important;
+        box-shadow: 0 6px 16px rgba(59, 130, 246, 0.4) !important;
+        transform: translateY(-1px);
+    }
+
+    div[data-testid="stSlider"] [data-testid="stTickBar"] {
+        background-image: linear-gradient(to right, #2D333B, #2D333B) !important;
+    }
+    div[data-testid="stThumb"] {
+        background-color: #FFFFFF !important;
+        border: 2px solid #3B82F6 !important;
+    }
+    div[data-baseweb="slider"] [role="slider"] {
+        background-color: #3B82F6 !important;
+    }
+
+    .plot-container {
+        background-color: #1F262F;
+        padding: 24px;
+        border-radius: 16px;
+        border: 1px solid #2D333B;
+        box-shadow: 0 10px 25px rgba(0, 0, 0, 0.3);
+    }
+
+    .status-box { 
+        background-color: #161B22; 
+        padding: 16px 24px; 
+        border-radius: 12px; 
+        margin-bottom: 25px; 
+        border: 1px solid #2D333B;
+        display: flex; 
+        justify-content: space-between; 
+        align-items: center; 
+    }
+    
+    .badge-done { 
+        background: #3B82F6; 
+        color: white; 
+        padding: 4px 12px; 
+        border-radius: 6px; 
+        font-size: 12px; 
+        font-weight: 700;
+    }
+
+    .block-container { padding-top: 2rem !important; }
+    
+    .streamlit-expanderHeader {
+        background-color: #161B22 !important;
+        border: 1px solid #2D333B !important;
+        border-radius: 8px !important;
+    }
+
+    [data-testid="stMainMenu"] ul li:not(:nth-child(1)) { display: none !important; }
+    [data-testid="stToolbar"] { display: none; }
+    [data-testid="stDecoration"] { display: none; }
+    </style>
+
+    <script>
+    (function() {
+        // === GeoSynth: принудительный показ сайдбара (защита от Streamlit багов) ===
+        function forceExpandSidebar() {
+            // 1. Удаляем из кеша Streamlit все признаки "collapsed" сайдбара
+            try {
+                const keysToRemove = [];
+                for (let i = 0; i < localStorage.length; i++) {
+                    const k = localStorage.key(i);
+                    if (k && (k.includes('sidebar') || k.includes('st-collapsed'))) keysToRemove.push(k);
+                }
+                keysToRemove.forEach(k => localStorage.removeItem(k));
+                for (let i = 0; i < sessionStorage.length; i++) {
+                    const k = sessionStorage.key(i);
+                    if (k && (k.includes('sidebar') || k.includes('st-collapsed'))) sessionStorage.removeItem(k);
+                }
+            } catch(e) {}
+
+            // 2. Ищем сайдбар ВСЕМИ возможными Streamlit-селекторами
+            const sidebar = document.querySelector('section[data-testid="stSidebar"], div[data-testid="stSidebar"], .stSidebar, [data-testid="stSidebar"]');
+            if (sidebar) {
+                sidebar.style.setProperty('width', '380px', 'important');
+                sidebar.style.setProperty('min-width', '380px', 'important');
+                sidebar.style.setProperty('max-width', '380px', 'important');
+                sidebar.style.setProperty('flex', '0 0 380px', 'important');
+                sidebar.style.setProperty('transform', 'none', 'important');
+                sidebar.style.setProperty('translate', 'none', 'important');
+                sidebar.style.setProperty('visibility', 'visible', 'important');
+                sidebar.style.setProperty('display', 'block', 'important');
+                sidebar.style.setProperty('margin-left', '0px', 'important');
+                sidebar.style.setProperty('position', 'relative', 'important');
+                sidebar.style.setProperty('z-index', '999', 'important');
+                sidebar.removeAttribute('aria-hidden');
+                sidebar.hidden = false;
+            }
+
+            // 3. Удаляем любые collapse-кнопки (если вдруг появились)
+            const collapseBtns = document.querySelectorAll('button[aria-label*="sidebar" i], button[aria-label*="Toggle" i], div[data-testid="stSidebarCollapseButton"], button[data-testid="stSidebarCollapseButton"]');
+            collapseBtns.forEach(btn => {
+                try { btn.remove(); } catch(e) { btn.style.display = 'none'; }
+            });
+
+            // 4. Двигаем main-контейнер вправо на ширину сайдбара (если Streamlit криво считает layout)
+            const appView = document.querySelector('[data-testid="stAppViewContainer"] > section.main, [data-testid="stMainBlockContainer"]');
+            if (appView && sidebar) {
+                appView.style.setProperty('margin-left', '380px', 'important');
+                appView.style.setProperty('max-width', 'calc(100vw - 380px)', 'important');
+                appView.style.setProperty('width', 'calc(100vw - 380px)', 'important');
+            }
+        }
+
+        // Запускаем сразу, при полной загрузке DOM + каждые 200ms в течение 3 сек (Streamlit ререндеры)
+        forceExpandSidebar();
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', forceExpandSidebar);
+        }
+        window.addEventListener('load', forceExpandSidebar);
+        let runs = 0;
+        const iv = setInterval(() => {
+            forceExpandSidebar();
+            runs++;
+            if (runs > 15) clearInterval(iv);
+        }, 200);
+    })();
+    </script>
+    """, unsafe_allow_html=True)
+
+# ==================================================
+# РЕЖИМ 1: Генерация клонов (1 скважина)
+# ==================================================
+if app_mode == "Генерация клонов (1 скважина)":
+    # --- SIDEBAR: СТРУКТУРА (Настройки генерации) ---
+    st.sidebar.markdown("<div class='sidebar-header'>Настройки генерации</div>", unsafe_allow_html=True)
+
+    with st.sidebar.container():
+        st.markdown("#### 📄 Паспорт скважины")
+        with st.expander("Открыть паспорт", expanded=False):
+            well_id = st.text_input("Номер скважины", value="205-Г")
+            study_type = st.selectbox("Вид исследования", ["ГИС (Стандартный комплекс)", "Сейсмокаротаж", "Спец. методы"])
+            
+    with st.sidebar.container():
+        st.markdown("#### 1. Загрузка")
+        uploaded_file = st.file_uploader("Загрузите LAS-файл", type=['las', 'csv'], label_visibility="collapsed")
+        
+        las_object = None
+
+        if uploaded_file:
+            try:
+                bytes_data = uploaded_file.read()
+                decoded = decode_file_content(bytes_data)
+                if uploaded_file.name.endswith('.las'):
+                    las_object = lasio.read(io.StringIO(decoded))
+                    df_raw = las_object.df().reset_index()
+                else:
+                    df_raw = pd.read_csv(io.StringIO(decoded))
+            except Exception as e:
+                st.sidebar.error(f"Ошибка: {e}")
+                df_raw = generate_dummy_data()
+        else:
+            df_raw = generate_dummy_data()
+
+        all_cols = list(df_raw.columns)
+        depth_col = find_depth_column(all_cols)
+        curve_cols = [c for c in all_cols if c != depth_col]
+
+        st.markdown("#### 2. Привязка кривых")
+        with st.expander("Показать привязку", expanded=False):
+            gk_map = st.selectbox("Гамма-каротаж (ГК / GR)", ["Нет"] + curve_cols, index=find_best_mnemonic(['GK', 'GR', 'GAMMA'], curve_cols))
+            sp_map = st.selectbox("ПС (Потенциал)", ["Нет"] + curve_cols, index=find_best_mnemonic(['SP', 'PS', 'SPC'], curve_cols))
+            res_map = st.selectbox("Сопротивление (БК / RES)", ["Нет"] + curve_cols, index=find_best_mnemonic(['RES', 'BK', 'RT'], curve_cols))
+            cond_map = st.selectbox("Проводимость (ИК / COND)", ["Нет"] + curve_cols, index=find_best_mnemonic(['COND', 'IK'], curve_cols))
+            nphi_map = st.selectbox("Нейтронный каротаж (НК / NKT)", ["Нет"] + curve_cols, index=find_best_mnemonic(['NPHI', 'NKT', 'NK'], curve_cols))
+            gmz_map = st.selectbox("Микрозонды (МКЗ)", ["Нет"] + curve_cols, index=find_best_mnemonic(['GMZ', 'PMZ'], curve_cols))
+
+    curves_map = { 
+        'GK': gk_map if gk_map != "Нет" else None, 
+        'SP': sp_map if sp_map != "Нет" else None,
+        'RES': res_map if res_map != "Нет" else None, 
+        'COND': cond_map if cond_map != "Нет" else None,
+        'NPHI': nphi_map if nphi_map != "Нет" else None,
+        'GMZ': gmz_map if gmz_map != "Нет" else None
+    }
+
+    with st.sidebar.form(key="generation_form"):
+        st.markdown("#### 3. Параметры (ИИ)")
+        d_min, d_max = float(df_raw[depth_col].min()), float(df_raw[depth_col].max())
+        orig_step = float(df_raw[depth_col].diff().median())
+
+        col1, col2 = st.columns(2)
+        with col1:
+            top = st.number_input("Кровля (м)", value=d_min, min_value=d_min, max_value=d_max, step=1.0)
+        with col2:
+            bottom = st.number_input("Подошва (м)", value=min(top + 20.0, d_max), min_value=d_min, max_value=d_max, step=1.0)
+        
+        col3, col4 = st.columns(2)
+        with col3:
+            saturation = st.selectbox("Насыщение", ["Вода (База)", "Нефть", "Газ"])
+        with col4:
+            step_options = [0.1, 0.2, 0.5]
+            default_step_idx = min(range(len(step_options)), key=lambda i: abs(step_options[i] - orig_step))
+            new_step = st.selectbox("Шаг (м)", options=step_options, index=default_step_idx)
+            
+        apply_fluid_effect = st.checkbox("Применить эффект насыщения", value=False)
+        add_artifacts = st.checkbox("Добавить аппаратные артефакты", value=False, help="Имитация сбоев телеметрии")
+        
+        with st.expander("Уровень шума (CV) по методам", expanded=False):
+            cv_col1, cv_col2 = st.columns(2)
+            with cv_col1:
+                cv_gk = st.number_input("ГК", min_value=0.0, max_value=3.0, value=0.15, step=0.01)
+                cv_res = st.number_input("БК", min_value=0.0, max_value=3.0, value=0.10, step=0.01)
+                cv_nphi = st.number_input("НКТ", min_value=0.0, max_value=3.0, value=0.08, step=0.01)
+            with cv_col2:
+                cv_sp = st.number_input("ПС", min_value=0.0, max_value=3.0, value=0.05, step=0.01)
+                cv_cond = st.number_input("ИК", min_value=0.0, max_value=3.0, value=0.10, step=0.01)
+                cv_gmz = st.number_input("МКЗ", min_value=0.0, max_value=3.0, value=0.12, step=0.01)
+
+        cv_mults = {
+            'GK': cv_gk,
+            'SP': cv_sp,
+            'RES': cv_res,
+            'COND': cv_cond,
+            'NPHI': cv_nphi,
+            'GMZ': cv_gmz
+        }
+
+        submit_button = st.form_submit_button(label="НАЧАТЬ ГЕНЕРАЦИЮ")
+
+    # --- ИНИЦИАЛИЗАЦИЯ SESSION STATE ---
+    if "generated" not in st.session_state:
+        st.session_state.generated = False
+
+    # --- ЛОГИКА ОБРАБОТКИ ---
+    if submit_button:
+        df_slice = df_raw[(df_raw[depth_col] >= top) & (df_raw[depth_col] <= bottom)].copy()
+        if df_slice.empty:
+            st.warning("⚠️ Интервал пуст.")
+            st.stop()
+
+        if abs(new_step - orig_step) > 0.001:
+            new_depths = np.arange(top, bottom + new_step/2, new_step)
+            resampled_data = {depth_col: new_depths}
+            for col in df_slice.columns:
+                if col != depth_col:
+                    f = interp1d(df_slice[depth_col], df_slice[col], bounds_error=False, fill_value="extrapolate")
+                    resampled_data[col] = f(new_depths)
+            df_active = pd.DataFrame(resampled_data)
+        else:
+            df_active = df_slice
+
+        df_synth = df_active.copy()
+        for key, col_name in curves_map.items():
+            if col_name and col_name in df_active.columns:
+                df_synth[col_name] = generate_cv_synthetic(df_active[col_name], cv_mults[key], curve_type=key, saturation=saturation, apply_fluid_effect=apply_fluid_effect, add_artifacts=add_artifacts)
+                
+        st.session_state.df_active = df_active
+        st.session_state.df_synth = df_synth
+        st.session_state.generated = True
+
+    # --- ОСНОВНАЯ ОБЛАСТЬ ---
+    st.markdown("<h2 style='margin-bottom: 20px;'>Цифровой двойник пласта</h2>", unsafe_allow_html=True)
+
+    if st.session_state.generated:
+        df_active = st.session_state.df_active
+        df_synth = st.session_state.df_synth
+        
+        view_mode = st.selectbox("Выберите метод:", ["Глинистость (ГК)", "Потенциал (ПС)", "Сопротивление (БК)", "Проводимость (ИК)", "Нейтронная пористость (НКТ)", "Микрозонды (МКЗ)"], index=0)
+
+        if view_mode in ["Сопротивление (БК)", "Микрозонды (МКЗ)"]:
+            st.info("💡 **Интерпретация:** График показывает изменение Удельного Электрического Сопротивления (УЭС). Желтая заливка соответствует повышению сопротивления, что характерно для замещения воды нефтью или газом.")
+
+        st.markdown(f"""
+            <div class="status-box">
+                <div style="color: #94A3B8;">📍 Скважина: {well_id} | Интервал: {top:.1f} - {bottom:.1f} м</div>
+                <span class="badge-done">{view_mode.upper()}</span>
+            </div>
+            """, unsafe_allow_html=True)
+
+        main_col1, main_col2 = st.columns([2, 1])
+        
+        with main_col1:
+            st.markdown('<div class="plot-container">', unsafe_allow_html=True)
+            st.pyplot(plot_log_comparison(df_active, df_synth, depth_col, curves_map, view_mode, saturation=saturation, apply_fluid_effect=apply_fluid_effect, plot_width=plot_width, plot_height=plot_height, show_grid=show_grid))
+            st.markdown('</div>', unsafe_allow_html=True)
+
+        with main_col2:
+            key_map = {"Глинистость (ГК)": "GK", "Потенциал (ПС)": "SP", "Сопротивление (БК)": "RES", "Проводимость (ИК)": "COND", "Нейтронная пористость (НКТ)": "NPHI", "Микрозонды (МКЗ)": "GMZ"}
+            active_key = key_map[view_mode]
+            c_name = curves_map.get(active_key)
+
+            if c_name and c_name in df_active.columns:
+                st.markdown("<h4 style='color: #FFFFFF; margin-bottom: 15px;'>Анализ качества</h4>", unsafe_allow_html=True)
+                
+                mu, sigma, cv = calculate_cv_stats(df_active[c_name])
+                st.markdown(f'<div style="background: #161B22; padding: 12px; border-radius: 8px; border: 1px solid #2D333B; margin-bottom: 10px; display: flex; justify-content: space-between;"><small>ИСХОДНИК</small> <b style="color: #3B82F6;">CV: {cv:.3f}</b></div>', unsafe_allow_html=True)
+                
+                mu_s, sigma_s, cv_s = calculate_cv_stats(df_synth[c_name])
+                st.markdown(f'<div style="background: #161B22; padding: 12px; border-radius: 8px; border: 1px solid #2D333B; margin-bottom: 15px; display: flex; justify-content: space-between;"><small>СИНТЕТИКА</small> <b style="color: #3B82F6;">CV: {cv_s:.3f}</b></div>', unsafe_allow_html=True)
+                
+                orig_series = df_active[c_name]
+                synth_series = df_synth[c_name]
+                mask = (~orig_series.isna()) & (~synth_series.isna())
+                
+                corr_pct = int(round(float(np.corrcoef(orig_series[mask], synth_series[mask])[0, 1]) * 100)) if mask.sum() >= 2 else 0
+                
+                mask_nonzero = mask & (orig_series != 0)
+                mape_pct = float(np.mean(np.abs((synth_series[mask_nonzero] - orig_series[mask_nonzero]) / orig_series[mask_nonzero])) * 100.0) if mask_nonzero.sum() >= 1 else 0.0
+                
+                h_dist = calculate_hellinger_distance(orig_series.values, synth_series.values)
+                h_color = "#10B981" if h_dist < 0.3 else "#F59E0B" if h_dist < 0.5 else "#EF4444"
+                
+                color = "#10B981" if corr_pct >= 75 else "#EF4444"
+                color_mape = "#10B981" if mape_pct <= 10.0 else "#EF4444"
+                
+                st.markdown(
+                    f'<div style="background: #161B22; padding: 15px; border-radius: 8px; border: 1px solid #2D333B; margin-bottom: 15px;">'
+                    f'<div style="color: #94A3B8; font-size: 0.9em; margin-bottom: 8px;">FIDELITY METRICS</div>'
+                    f'<div style="display: flex; justify-content: space-between; margin-bottom: 4px;"><span>Корреляция:</span> <b style="color: {color};">{corr_pct}%</b></div>'
+                    f'<div style="display: flex; justify-content: space-between; margin-bottom: 4px;"><span>MAPE:</span> <b style="color: {color_mape};">{mape_pct:.1f}%</b></div>'
+                    f'<div style="display: flex; justify-content: space-between;"><span>Hellinger Dist:</span> <b style="color: {h_color};">{h_dist:.3f}</b></div>'
+                    f'</div>',
+                    unsafe_allow_html=True
+                )
+                
+                with st.expander("Распределение (PDF)", expanded=True):
+                    st.pyplot(plot_distribution_comparison(df_active, df_synth, c_name))
+                
+                st.markdown("---")
+                las_data = get_las_binary(las_object, df_synth, depth_col)
+                st.download_button(
+                    label="💾 Скачать LAS 2.0",
+                    data=las_data,
+                    file_name="Synthetic_Well_01_synth.las",
+                    mime="application/octet-stream",
+                    use_container_width=True
+                )
+            else:
+                st.warning(f"Метод {view_mode} отсутствует в текущей скважине. Выберите другой метод из списка выше или настройте привязку мнемоник.")
+    else:
+        st.info("👈 Настройте параметры в боковой панели и нажмите **НАЧАТЬ ГЕНЕРАЦИЮ**, чтобы создать цифровой двойник.")
+
+# ==================================================
+# РЕЖИМ 2: Морфинг фаций (2 скважины)
+# ==================================================
+elif app_mode == "Морфинг фаций (2 скважины)":
+    st.title("Межскважинный Морфинг и CVAE-моделирование")
+    st.info("Загрузите две скважины для построения макро-тренда и стохастической вариативности (ПС + ГК).")
+    
+    col_a, col_b = st.columns(2)
+    with col_a:
+        file_a = st.file_uploader("LAS Скв. А (Эталон)", type=['las'], key="file_a")
+    with col_b:
+        file_b = st.file_uploader("LAS Скв. Б (Для скрещивания)", type=['las'], key="file_b")
+        
+    weight = st.slider("Близость к Скв. Б (Вес морфинга)", 0.0, 1.0, 0.5, 0.1)
+
+    # === НАСТРОЙКИ СТОХАСТИКИ CVAE ===
+    col_v1, col_v2 = st.columns(2)
+    with col_v1:
+        cvae_seed = st.number_input("Зерно стохастической вариативности (Seed)", value=101, step=1)
+    with col_v2:
+        cvae_sigma = st.slider("Контрастность вариаций CVAE (Sigma)", 0.5, 2.5, 1.65, 0.05)
+    # =================================
+    
+    if file_a and file_b:
+        try:
+            text_a = file_a.getvalue().decode("utf-8")
+        except UnicodeDecodeError:
+            text_a = file_a.getvalue().decode("windows-1251")
+            
+        try:
+            text_b = file_b.getvalue().decode("utf-8")
+        except UnicodeDecodeError:
+            text_b = file_b.getvalue().decode("windows-1251")
+
+        las_a = lasio.read(io.StringIO(text_a))
+        las_b = lasio.read(io.StringIO(text_b))
+        
+        st.markdown("### ✂️ Выделение пласта (Фации)")
+        
+        df_a = las_a.df()
+        df_b = las_b.df()
+        
+        col_a_cut, col_b_cut = st.columns(2)
+        with col_a_cut:
+            st.write("**Скважина А**")
+            top_a = st.number_input("Кровля пласта А (м)", value=float(df_a.index.min()), step=0.1)
+            bot_a = st.number_input("Подошва пласта А (м)", value=float(df_a.index.max()), step=0.1)
+        
+        with col_b_cut:
+            st.write("**Скважина Б**")
+            top_b = st.number_input("Кровля пласта Б (м)", value=float(df_b.index.min()), step=0.1)
+            bot_b = st.number_input("Подошва пласта Б (м)", value=float(df_b.index.max()), step=0.1)
+
+        df_a_cut = df_a[(df_a.index >= top_a) & (df_a.index <= bot_a)]
+        df_b_cut = df_b[(df_b.index >= top_b) & (df_b.index <= bot_b)]
+        
+        if not df_a_cut.empty and not df_b_cut.empty:
+            
+            ps_col_a = 'PS' if 'PS' in df_a_cut.columns else ('SP' if 'SP' in df_a_cut.columns else None)
+            ps_col_b = 'PS' if 'PS' in df_b_cut.columns else ('SP' if 'SP' in df_b_cut.columns else None)
+
+            if ps_col_a and ps_col_b:
+                ps_a = df_a_cut[ps_col_a][df_a_cut[ps_col_a] > -1000].dropna().reset_index(drop=True)
+                ps_b = df_b_cut[ps_col_b][df_b_cut[ps_col_b] > -1000].dropna().reset_index(drop=True)
+                
+                if len(ps_a) > 5 and len(ps_b) > 5:
+                    synth_ps = morph_wells(ps_a, ps_b, weight)
+                    st.success(f"Морфинг пласта успешен! Итоговое количество срезов: {len(synth_ps)}")
+                    
+                    # === РАСЧЕТ И ОТРИСОВКА CVAE (ГК + ПС) ===
+                    cvae_net, cvae_meta = load_cvae("cvae_weights.pt")
+                    
+                    if cvae_net is not None:
+                        rng = np.random.default_rng(int(cvae_seed))
+                        z_sample = rng.normal(0.0, cvae_sigma, size=(1, 4))
+                        z_tensor = torch.FloatTensor(z_sample)
+                        
+                        with torch.no_grad():
+                            out_cvae = cvae_net.decode(z_tensor).numpy()
+                            
+                        gk_phys = (out_cvae[0, 0, :] + 1.0) / 2.0 * (cvae_meta['gk_max'] - cvae_meta['gk_min']) + cvae_meta['gk_min']
+                        ps_phys = (out_cvae[0, 1, :] + 1.0) / 2.0 * (cvae_meta['ps_max'] - cvae_meta['ps_min']) + cvae_meta['ps_min']
+                        
+                        gk_filt = gaussian_filter1d(gk_phys, sigma=0.8)
+                        ps_filt = gaussian_filter1d(ps_phys, sigma=1.5)
+                        final_gk = resample_curve(pd.Series(gk_filt), len(synth_ps))
+                        final_ps = resample_curve(pd.Series(ps_filt), len(synth_ps))
+                        
+                        st.markdown("#### Каротаж ПС (Сравнение тренда морфинга и CVAE)")
+                        st.line_chart({
+                            "Скважина А (Эталон)": resample_curve(ps_a, len(synth_ps)),
+                            "Скважина Б (Эталон)": resample_curve(ps_b, len(synth_ps)),
+                            "Макро-тренд (Морфинг)": synth_ps,
+                            "CVAE Синтетика (ПС)": final_ps
+                        })
+                        
+                        st.markdown("#### Согласованный Гамма-каротаж ГК (CVAE)")
+                        st.line_chart({
+                            "Синтетика ГК (мкР/ч)": final_gk
+                        })
+                    else:
+                        st.line_chart({
+                            "Скважина А (Эталон)": resample_curve(ps_a, len(synth_ps)),
+                            "Скважина Б (Эталон)": resample_curve(ps_b, len(synth_ps)),
+                            "Транзитная Синтетика": synth_ps
+                        })
+            else:
+                st.error("В одной из выбранных скважин не найдена кривая ПС/SP.")
+            
+            # --- ПАКЕТНАЯ ГЕНЕРАЦИЯ (ML ENGINE) ---
+            st.markdown("---")
+            st.subheader("📦 Пакетная генерация Датасета (ML Engine)")
+            st.info("Будет сгенерировано 11 вариантов транзитной скважины (от 100% Скв. А до 100% Скв. Б с шагом 10%) и запаковано в ZIP-архив.")
+            
+            try:
+                zip_buffer = io.BytesIO()
+                weights_list = np.linspace(0.0, 1.0, 11)
+                
+                with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+                    for w in weights_list:
+                        w_rounded = round(w, 1)
+                        
+                        if w_rounded == 0.0:
+                            current_len = len(df_a_cut)
+                        elif w_rounded == 1.0:
+                            current_len = len(df_b_cut)
+                        else:
+                            current_len = max(len(df_a_cut), len(df_b_cut))
+                        
+                        new_las = lasio.LASFile()
+                        synth_depth = np.arange(current_len) * 0.2
+                        new_las.append_curve("DEPT", synth_depth, unit="M", descr="Synthetic Relative Depth")
+                        
+                        for curve in las_a.curves:
+                            c_name = curve.mnemonic
+                            if c_name == "DEPT": 
+                                continue 
+                            
+                            if c_name in df_b_cut.columns and c_name in df_a_cut.columns:
+                                if w_rounded == 0.0:
+                                    final_values = np.array(df_a_cut[c_name].values, dtype=float)
+                                    new_las.append_curve(c_name, final_values, unit=curve.unit, descr=f"Original {c_name} A")
+                                elif w_rounded == 1.0:
+                                    final_values = np.array(df_b_cut[c_name].values, dtype=float)
+                                    new_las.append_curve(c_name, final_values, unit=curve.unit, descr=f"Original {c_name} B")
+                                else:
+                                    data_a = df_a_cut[c_name][df_a_cut[c_name] > -1000].dropna().reset_index(drop=True)
+                                    data_b = df_b_cut[c_name][df_b_cut[c_name] > -1000].dropna().reset_index(drop=True)
+                                    
+                                    if len(data_a) > 5 and len(data_b) > 5:
+                                        morphed = morph_wells(data_a, data_b, w_rounded)
+                                        final_values = resample_curve(morphed, current_len).values
+                                        final_values = np.array(final_values, dtype=float)
+                                        new_las.append_curve(c_name, final_values, unit=curve.unit, descr=f"Morphed {c_name} W:{w_rounded}")
+                        
+                        string_buffer = io.StringIO()
+                        new_las.write(string_buffer, version=2.0)
+                        zip_file.writestr(f"Synthetic_Facies_Weight_{w_rounded}.las", string_buffer.getvalue())
+                
+                st.download_button(
+                    label="📥 Скачать ML Dataset (ZIP)",
+                    data=zip_buffer.getvalue(),
+                    file_name="ML_Synthetic_Dataset.zip",
+                    mime="application/zip",
+                    use_container_width=True
+                )
+            except Exception as e:
+                st.error(f"Ошибка при создании пакета LAS-файлов: {e}")
+
+# ==================================================
+# РЕЖИМ 3: Пространственная интерполяция (IDW) + CVAE
+# ==================================================
+elif app_mode == "Пространственная интерполяция (IDW)":
+
+    st.markdown("<h2 style='margin-bottom: 20px;'>🌍 Пространственная интерполяция (IDW) + CVAE</h2>", unsafe_allow_html=True)
+    st.markdown("<p style='color: #94A3B8;'>Загрузите 2+ опорных скважины с координатами. Введите координаты синтетических точек в таблице или настройте регулярную сетку. Для каждой точки будет выполнена <b>гибридная генерация</b>: IDW-тренд + CVAE-микроструктура (ГК/ПС) или Гауссов шум (БК/ИК/НКТ/МКЗ) с учётом пространственной неопределённости.</p>", unsafe_allow_html=True)
+
+    # --- SIDEBAR ---
+    st.sidebar.markdown("<div class='sidebar-header'>Параметры IDW</div>", unsafe_allow_html=True)
+    st.sidebar.markdown("#### 1. Опорные скважины")
+    uploaded_files_idw = st.sidebar.file_uploader("Загрузите LAS-файлы (минимум 2)", type=['las'], accept_multiple_files=True, label_visibility="collapsed")
+
+    wells_data_idw = []
+    if uploaded_files_idw:
+        for idx_f, f in enumerate(uploaded_files_idw):
+            try:
+                info = extract_idw_well_info(f, default_idx=idx_f)
+                wells_data_idw.append(info)
+            except Exception as e:
+                st.sidebar.warning(f"⚠️ Ошибка {f.name}: {str(e)}")
+
+        with st.sidebar.expander("Опорные скважины (активность)", expanded=True):
+            for w in wells_data_idw:
+                w_state_key = f"idw_active_{w['name']}"
+                if w_state_key not in st.session_state:
+                    st.session_state[w_state_key] = True
+                w['active'] = st.checkbox(
+                    f"{w['name']} (X:{int(w['x'])}, Y:{int(w['y'])})", 
+                    value=st.session_state[w_state_key], 
+                    key=w_state_key
+                )
+
+        with st.sidebar.expander("Сводка методов каротажа", expanded=False):
+            summary_rows = []
+            for w in wells_data_idw:
+                summary_rows.append({
+                    "Скважина": w['name'],
+                    "ГК": w['curves']['GK'] if w['curves']['GK'] else "—",
+                    "ПС": w['curves']['SP'] if w['curves']['SP'] else "—",
+                    "БК": w['curves']['RES'] if w['curves']['RES'] else "—",
+                    "ИК": w['curves']['COND'] if w['curves']['COND'] else "—",
+                    "НКТ": w['curves']['NPHI'] if w['curves']['NPHI'] else "—",
+                    "МКЗ": w['curves']['GMZ'] if w['curves']['GMZ'] else "—",
+                })
+            st.dataframe(pd.DataFrame(summary_rows), hide_index=True, use_container_width=True)
+
+    # --- Вычисление координат для карты (fallback-диапазон 0..500 м если нет опорных скважин) ---
+    if len(wells_data_idw) > 0:
+        all_xs = [w['x'] for w in wells_data_idw]
+        all_ys = [w['y'] for w in wells_data_idw]
+        min_x, max_x = float(min(all_xs)), float(max(all_xs))
+        min_y, max_y = float(min(all_ys)), float(max(all_ys))
+    else:
+        min_x, max_x = 0.0, 500.0
+        min_y, max_y = 0.0, 500.0
+
+    # ============== ОСНОВНАЯ ЧАСТЬ: ТАБЛИЦА + КАРТА ===================
+    st.markdown("<h3 style='color: #3B82F6; margin-top: 10px;'>📍 Синтетические точки: Таблица + Карта</h3>", unsafe_allow_html=True)
+
+    if "idw_points" not in st.session_state:
+        st.session_state.idw_points = pd.DataFrame(
+            {"ID": [f"SYNTH_1"], "X": [float(round((min_x + max_x)/2.0, 1))], "Y": [float(round((min_y + max_y)/2.0, 1))]}
+        )
+
+    col_left, col_right = st.columns([1.1, 1.2])
+
+    with col_left:
+        st.subheader("📋 Таблица координат")
+        st.caption("Редактируйте X/Y напрямую в таблице — карта обновится автоматически")
+
+        edited_df = st.data_editor(
+            st.session_state.idw_points,
+            num_rows="dynamic",
+            use_container_width=True,
+            height=260,
+            column_config={
+                "ID": st.column_config.Column("ID скважины", width="medium"),
+                "X": st.column_config.NumberColumn("X (м)", step=1.0, required=True),
+                "Y": st.column_config.NumberColumn("Y (м)", step=1.0, required=True),
+            }
+        )
+        st.session_state.idw_points = edited_df
+
+        ca1, ca2 = st.columns(2)
+        with ca1:
+            step_grid = st.number_input("Шаг сетки (м)", min_value=50.0, max_value=1000.0, value=250.0, step=25.0, key="idw_grid_step")
+            if st.button("🔲 Построить регулярную сетку", use_container_width=True):
+                x_vals = np.arange(min_x, max_x + 0.1, step_grid)
+                y_vals = np.arange(min_y, max_y + 0.1, step_grid)
+                rows = []
+                cnt = 1
+                for gx in x_vals:
+                    for gy in y_vals:
+                        rows.append({"ID": f"GRID_{cnt}", "X": float(round(gx, 1)), "Y": float(round(gy, 1))})
+                        cnt += 1
+                st.session_state.idw_points = pd.DataFrame(rows)
+                st.rerun()
+        with ca2:
+            st.write(""); st.write("")
+            if st.button("🗑️ Очистить все точки", use_container_width=True):
+                st.session_state.idw_points = pd.DataFrame({"ID": [], "X": [], "Y": []})
+                st.rerun()
+
+    with col_right:
+        st.subheader("🗺️ Карта расположения")
+        pad_x = max((max_x - min_x) * 0.2, 200.0)
+        pad_y = max((max_y - min_y) * 0.2, 200.0)
+        rng_x = [min_x - pad_x, max_x + pad_x]
+        rng_y = [min_y - pad_y, max_y + pad_y]
+
+        fig_map = go.Figure()
+
+        # Опорные скважины (СИНИЕ circle)
+        for idx, w in enumerate(wells_data_idw):
+            status = "✓" if w.get('active', True) else "✗"
+            fig_map.add_trace(go.Scatter(
+                x=[w['x']], y=[w['y']],
+                mode='markers+text',
+                marker=dict(size=16, color="#3B82F6", line=dict(color="#FFFFFF", width=2), symbol="circle"),
+                text=[f"{status} {w['name']}"],
+                textposition="top center",
+                textfont=dict(color="#93C5FD", size=11),
+                hovertemplate=f"<b>{w['name']}</b><br>X: {w['x']:.1f} м<br>Y: {w['y']:.1f} м<br>Активна: {w.get('active', True)}<extra></extra>",
+                name="Опорные скважины",
+                showlegend=(idx == 0),
+                legendgroup="base"
+            ))
+
+        # Синтетические точки (КРАСНЫЕ diamond)
+        if not edited_df.empty:
+            valid_df = edited_df.dropna(subset=['X', 'Y'])
+            fig_map.add_trace(go.Scatter(
+                x=valid_df['X'].values, y=valid_df['Y'].values,
+                mode='markers+text',
+                marker=dict(size=14, color="#EF4444", line=dict(color="#FFFFFF", width=2), symbol="diamond"),
+                text=valid_df['ID'].astype(str).values,
+                textposition="top center",
+                textfont=dict(color="#FCA5A5", size=11),
+                hovertemplate="<b>%{text}</b><br>X: %{x:.1f} м<br>Y: %{y:.1f} м<extra></extra>",
+                name="Синтетические точки"
+            ))
+
+        fig_map.update_layout(
+            paper_bgcolor="#161B22", plot_bgcolor="#0F1116",
+            xaxis=dict(title="X (м)", gridcolor="#2D333B", color="#94A3B8", range=rng_x),
+            yaxis=dict(title="Y (м)", gridcolor="#2D333B", color="#94A3B8", scaleanchor="x", scaleratio=1, range=rng_y),
+            legend=dict(bgcolor="#161B22", bordercolor="#2D333B", font=dict(color="#E2E8F0")),
+            margin=dict(l=10, r=10, t=20, b=10),
+            height=380,
+        )
+        st.plotly_chart(fig_map, use_container_width=True)
+
+    # --- Info-подсказка если нет 2 опорных скважин (БЕЗ st.stop — таблица+карта уже нарисованы) ---
+    if len(wells_data_idw) < 2:
+        st.info("👈 Необходимо загрузить минимум 2 LAS-файла с каротажными данными для выполнения IDW-расчёта и генерации синтетики.")
+
+    # ============== ГИБРИДНАЯ ГЕНЕРАЦИЯ + ВИЗУАЛИЗАЦИЯ + ZIP (ТОЛЬКО ЕСЛИ >=2 СКВАЖИН) ===================
+    if len(wells_data_idw) >= 2:
+        active_wells_idw = [w for w in wells_data_idw if w.get('active', True)]
+        if len(active_wells_idw) < 1:
+            st.warning("⚠️ Включите хотя бы одну опорную скважину в боковой панели.")
+        else:
+            # Интервал пласта (общая граница по опорным скважинам)
+            dfs_indices = []
+            for w in active_wells_idw:
+                df_w = w['df']
+                d_col_w = w['depth_col']
+                dfs_indices.append((float(df_w[d_col_w].min()), float(df_w[d_col_w].max())))
+
+            global_min_d = max(d[0] for d in dfs_indices)
+            global_max_d = min(d[1] for d in dfs_indices)
+            def_top = max(global_min_d, 2100.0) if global_max_d > 2100.0 else global_min_d
+            def_bot = min(def_top + 35.0, global_max_d)
+
+            st.sidebar.markdown("---")
+            st.sidebar.markdown("#### 2. Интервал пласта")
+            top_depth = st.sidebar.number_input("Кровля (м)", value=def_top, min_value=global_min_d, max_value=global_max_d, step=1.0)
+            bot_depth = st.sidebar.number_input("Подошва (м)", value=def_bot, min_value=global_min_d, max_value=global_max_d, step=1.0)
+            if top_depth >= bot_depth:
+                st.sidebar.error("Кровля должна быть меньше подошвы.")
+            else:
+                st.sidebar.markdown("---")
+                st.sidebar.markdown("#### 3. Параметры стохастики CVAE")
+                cvae_influence = st.sidebar.slider("Степень вариативности CVAE", 0.05, 1.0, 0.35, 0.05)
+                sigma_val = st.sidebar.slider("Дисперсия (Sigma) лат. пространства", 0.1, 2.0, 0.8, 0.05)
+                base_seed = st.sidebar.number_input("Базовый Seed", value=101, step=1)
+
+                st.sidebar.markdown("---")
+                with st.sidebar.expander("Уровень шума (CV) для БК/ИК/НКТ/МКЗ", expanded=False):
+                    cv_col1, cv_col2 = st.columns(2)
+                    with cv_col1:
+                        cv_res_idw = st.number_input("БК (RES)", min_value=0.0, max_value=3.0, value=0.10, step=0.01)
+                        cv_nphi_idw = st.number_input("НКТ (NPHI)", min_value=0.0, max_value=3.0, value=0.08, step=0.01)
+                    with cv_col2:
+                        cv_cond_idw = st.number_input("ИК (COND)", min_value=0.0, max_value=3.0, value=0.10, step=0.01)
+                        cv_gmz_idw = st.number_input("МКЗ (GMZ)", min_value=0.0, max_value=3.0, value=0.12, step=0.01)
+                    saturation_idw = st.selectbox("Насыщение флюида", ["Вода (База)", "Нефть", "Газ"], index=0)
+                    apply_fluid_idw = st.checkbox("Применить эффект насыщения", value=False)
+
+                cv_mults_idw = {'RES': cv_res_idw, 'COND': cv_cond_idw, 'NPHI': cv_nphi_idw, 'GMZ': cv_gmz_idw}
+
+                # Загрузка CVAE + вычисление общей сетки глубин
+                cvae_net, cvae_meta = load_cvae("cvae_weights.pt")
+                target_points = int(cvae_meta['input_dim']) if cvae_meta and 'input_dim' in cvae_meta else 200
+                depth_axis = np.linspace(top_depth, bot_depth, target_points)
+
+                # Ресемплинг ВСЕХ 6 КРИВЫХ опорных скважин на общую сетку
+                CURVES_IDW = ['GK', 'SP', 'RES', 'COND', 'NPHI', 'GMZ']
+                defaults_idw = {'GK': 50.0, 'SP': 0.0, 'RES': 10.0, 'COND': 100.0, 'NPHI': 0.2, 'GMZ': 8.0}
+                resampled_curves = {k: [] for k in CURVES_IDW}
+
+                for w in active_wells_idw:
+                    df_w = w['df']
+                    d_col_w = w['depth_col']
+                    d_raw = df_w[d_col_w].values.astype(float)
+                    for k in CURVES_IDW:
+                        col = w['curves'][k]
+                        if col and col in df_w.columns:
+                            values_raw = df_w[col].values.astype(float)
+                        else:
+                            values_raw = np.full_like(d_raw, defaults_idw[k], dtype=float)
+                        grid_vals = resample_curve_on_depth(d_raw, values_raw, depth_axis)
+                        resampled_curves[k].append(grid_vals)
+
+                # Проверка: есть ли точки для генерации
+                valid_points = edited_df.dropna(subset=['X', 'Y']).copy()
+                if len(valid_points) == 0:
+                    st.info("👆 Добавьте хотя бы одну точку в таблице слева для генерации синтетики.")
+                else:
+                    st.markdown("---")
+                    st.markdown("<h3 style='color: #10B981; margin-top: 5px;'>🧬 Гибридная генерация скважин</h3>", unsafe_allow_html=True)
+
+                    cvae_gk_min = float(cvae_meta.get('gk_min', 0.0)) if cvae_meta else 0.0
+                    cvae_gk_max = float(cvae_meta.get('gk_max', 150.0)) if cvae_meta else 150.0
+                    cvae_ps_min = float(cvae_meta.get('ps_min', -100.0)) if cvae_meta else -100.0
+                    cvae_ps_max = float(cvae_meta.get('ps_max', 50.0)) if cvae_meta else 50.0
+
+                    generated_wells_idw = []
+
+                    with st.progress(0, text="Подготовка генерации...") as prog_bar:
+                        for idx_row, (_, row) in enumerate(valid_points.iterrows()):
+                            pt_id = str(row['ID']) if str(row['ID']).strip() else f"SYNTH_{idx_row+1}"
+                            pt_x = float(row['X'])
+                            pt_y = float(row['Y'])
+
+                            # 1. IDW веса (power=1.5, нормализация)
+                            weights = compute_idw_weights(active_wells_idw, pt_x, pt_y)
+                            max_w = max(weights)
+
+                            # 2. Пространственная неопределённость — формула пользователя
+                            spatial_uncertainty = float(np.clip(1.2 * (1.0 - max_w), 0.15, 1.0))
+
+                            # 3. Детерминированный IDW-тренд для всех 6 кривых
+                            det_trend = {}
+                            for k in CURVES_IDW:
+                                arr = np.zeros(target_points, dtype=float)
+                                for i_w, w_coeff in enumerate(weights):
+                                    arr += np.array(resampled_curves[k][i_w], dtype=float) * w_coeff
+                                det_trend[k] = arr
+
+                            # 4. Стохастика для ГК и ПС — через декодер CVAE
+                            final_curves = dict(det_trend)
+                            if cvae_net is not None:
+                                try:
+                                    rng = np.random.default_rng(int(base_seed) + idx_row * 17)
+                                    z_sample = rng.normal(0.0, sigma_val, size=(1, 4))
+                                    with torch.no_grad():
+                                        out_cvae = cvae_net.decode(torch.FloatTensor(z_sample)).numpy()
+
+                                    gk_eval = (out_cvae[0, 0, :] + 1.0) / 2.0 * (cvae_gk_max - cvae_gk_min) + cvae_gk_min
+                                    ps_eval = (out_cvae[0, 1, :] + 1.0) / 2.0 * (cvae_ps_max - cvae_ps_min) + cvae_ps_min
+                                    gk_noise = gk_eval - np.mean(gk_eval)
+                                    ps_noise = ps_eval - np.mean(ps_eval)
+                                    ps_noise = gaussian_filter1d(ps_noise, sigma=1.0)
+                                    gk_noise = gaussian_filter1d(gk_noise, sigma=0.4)
+
+                                    alpha = cvae_influence * spatial_uncertainty
+                                    final_curves['GK'] = det_trend['GK'] + gk_noise * alpha
+                                    final_curves['SP'] = det_trend['SP'] + ps_noise * alpha
+                                except Exception:
+                                    pass
+
+                            # 5. Стохастика для БК, ИК, НКТ, МКЗ — generate_cv_synthetic * spatial_uncertainty
+                            for k in ['RES', 'COND', 'NPHI', 'GMZ']:
+                                trend_series = pd.Series(det_trend[k])
+                                noisy = generate_cv_synthetic(
+                                    trend_series,
+                                    cv_multiplier=cv_mults_idw[k],
+                                    curve_type=k,
+                                    saturation=saturation_idw,
+                                    apply_fluid_effect=apply_fluid_idw,
+                                    add_artifacts=False,
+                                    noise_scale=spatial_uncertainty
+                                )
+                                final_curves[k] = np.array(noisy, dtype=float)
+
+                            generated_wells_idw.append({
+                                'id': pt_id,
+                                'x': pt_x, 'y': pt_y,
+                                'max_weight': max_w,
+                                'spatial_uncertainty': spatial_uncertainty,
+                                'weights': weights,
+                                'curves': final_curves
+                            })
+                            prog_bar.progress((idx_row + 1) / len(valid_points), text=f"Генерация {pt_id}...")
+
+                    st.success(f"✅ Успешно сгенерировано {len(generated_wells_idw)} синтетических скважин!")
+
+                    # ============== ВИЗУАЛИЗАЦИЯ: 6-трековый планшет ===================
+                    st.markdown("### 📊 Каротажный планшет синтетической скважины")
+                    if len(generated_wells_idw) == 1:
+                        curr = generated_wells_idw[0]
+                    else:
+                        options_ids = [f"{g['id']} (X={g['x']:.1f}, Y={g['y']:.1f}, σ_spatial={g['spatial_uncertainty']:.2f})" for g in generated_wells_idw]
+                        sel = st.selectbox("Выберите скважину для просмотра", range(len(generated_wells_idw)), 
+                                         format_func=lambda i: options_ids[i])
+                        curr = generated_wells_idw[sel]
+
+                    plt.style.use('dark_background')
+                    fig_bg = '#1F262F'
+                    ax_bg = '#161B22'
+                    text_color = '#94A3B8'
+                    spine_color = '#2D333B'
+                    well_colors_idw = ['#3B82F6', '#10B981', '#F59E0B', '#8B5CF6', '#EF4444', '#06B6D4']
+
+                    fig, axes = plt.subplots(1, 6, figsize=(plot_width * 1.4, plot_height), sharey=True)
+                    fig.patch.set_facecolor(fig_bg)
+
+                    titles = [
+                        ("ГК", "мкР/ч", 'GK'),
+                        ("ПС", "мВ", 'SP'),
+                        ("БК (RES)", "Ом·м", 'RES'),
+                        ("ИК (COND)", "мСм/м", 'COND'),
+                        ("НКТ (NPHI)", "д.е.", 'NPHI'),
+                        ("МКЗ (GMZ)", "Ом·м", 'GMZ'),
+                    ]
+
+                    for ax_idx, (title, unit, k) in enumerate(titles):
+                        ax = axes[ax_idx]
+                        for i_w, w in enumerate(active_wells_idw):
+                            c = well_colors_idw[i_w % len(well_colors_idw)]
+                            w_coeff = curr['weights'][i_w]
+                            vals = np.array(resampled_curves[k][i_w], dtype=float)
+                            if k in ['RES', 'COND', 'GMZ']:
+                                ax.semilogx(vals, depth_axis, color=c, lw=1.0, alpha=0.5, label=f"{w['name'][:10]} w={w_coeff:.2f}")
+                            else:
+                                ax.plot(vals, depth_axis, color=c, lw=1.0, alpha=0.5, label=f"{w['name'][:10]} w={w_coeff:.2f}")
+
+                        syn_color = '#F43F5E'
+                        syn_vals = curr['curves'][k]
+                        if k in ['RES', 'COND', 'GMZ']:
+                            ax.semilogx(syn_vals, depth_axis, color=syn_color, lw=2.2, label=f"СИНТЕЗ {curr['id']}")
+                        else:
+                            ax.plot(syn_vals, depth_axis, color=syn_color, lw=2.2, label=f"СИНТЕЗ {curr['id']}")
+
+                        ax.set_title(f"{title}", fontsize=11, fontweight='bold', color=text_color, pad=10)
+                        ax.set_xlabel(unit, fontsize=8, color=text_color)
+                        ax.tick_params(labelsize=7, colors=text_color)
+                        ax.invert_yaxis()
+                        ax.grid(True, linestyle='--', alpha=0.3, color='#2D333B')
+                        ax.set_facecolor(ax_bg)
+                        for sp in ax.spines.values():
+                            sp.set_color(spine_color)
+                        ax.legend(loc='upper right', fontsize=6, facecolor=ax_bg, edgecolor='#2D333B', labelcolor=text_color)
+
+                    axes[0].set_ylabel("Глубина, м", fontsize=10, fontweight='bold', color=text_color)
+                    plt.tight_layout(w_pad=0.1)
+
+                    st.markdown('<div class="plot-container">', unsafe_allow_html=True)
+                    st.pyplot(fig)
+                    st.markdown('</div>', unsafe_allow_html=True)
+
+                    st.markdown(
+                        f'<div class="status-box">'
+                        f'<div style="color: #94A3B8;">📍 Скважина: <b style="color: #3B82F6;">{curr["id"]}</b> | Координаты: X={curr["x"]:.1f}, Y={curr["y"]:.1f} м | Интервал: {top_depth:.1f}–{bot_depth:.1f} м</div>'
+                        f'<div style="display: flex; gap: 10px;">'
+                        f'<span class="badge-done">max IDW вес: {curr["max_weight"]:.3f}</span>'
+                        f'<span style="background:#F59E0B;color:#0F1116;padding:4px 12px;border-radius:6px;font-size:12px;font-weight:700;">σ_space = {curr["spatial_uncertainty"]:.2f}</span>'
+                        f'</div></div>',
+                        unsafe_allow_html=True
+                    )
+
+                    # ============== ПАКЕТНЫЙ ЭКСПОРТ LAS В ZIP ===================
+                    st.markdown("---")
+                    st.subheader("📦 Пакетный экспорт (ML Dataset)")
+
+                    curve_export_map = {
+                        'GK': ('GK', 'MKR/H', 'Gamma Ray (IDW+CVAE)'),
+                        'SP': ('PS', 'MV', 'Self Potential (IDW+CVAE)'),
+                        'RES': ('BK', 'OHMM', 'Borehole Resistivity (IDW+Gauss * σ_space)'),
+                        'COND': ('IK', 'MSM/M', 'Conductivity (IDW+Gauss * σ_space)'),
+                        'NPHI': ('NKT', 'V/V', 'Neutron Porosity (IDW+Gauss * σ_space)'),
+                        'GMZ': ('MKZ', 'OHMM', 'Microresistivity (IDW+Gauss * σ_space)'),
+                    }
+
+                    try:
+                        zip_buf = io.BytesIO()
+                        with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zip_file:
+                            for gw in generated_wells_idw:
+                                las_obj = lasio.LASFile()
+                                las_obj.well.WELL = str(gw['id'])
+                                try:
+                                    las_obj.well['X'] = lasio.HeaderItem('X', value=str(gw['x']), descr='X Coordinate, m')
+                                    las_obj.well['Y'] = lasio.HeaderItem('Y', value=str(gw['y']), descr='Y Coordinate, m')
+                                except Exception:
+                                    try:
+                                        setattr(las_obj.well, 'X', lasio.HeaderItem(mnemonic='X', value=str(gw['x']), descr='X Coordinate, m'))
+                                        setattr(las_obj.well, 'Y', lasio.HeaderItem(mnemonic='Y', value=str(gw['y']), descr='Y Coordinate, m'))
+                                    except Exception:
+                                        pass
+
+                                las_obj.append_curve("DEPT", depth_axis, unit="M", descr="Depth, meters")
+                                for k in CURVES_IDW:
+                                    mnem, unit, descr = curve_export_map[k]
+                                    las_obj.append_curve(mnem, gw['curves'][k], unit=unit, descr=descr)
+
+                                str_buf = io.StringIO()
+                                try:
+                                    las_obj.write(str_buf, version=2.0)
+                                except TypeError:
+                                    las_obj.write(str_buf)
+
+                                file_name = f"{gw['id']}_X{int(gw['x'])}_Y{int(gw['y'])}.las"
+                                zip_file.writestr(file_name, str_buf.getvalue())
+
+                        st.download_button(
+                            label=f"📥 Скачать ML Dataset (ZIP) — {len(generated_wells_idw)} LAS-файлов",
+                            data=zip_buf.getvalue(),
+                            file_name="IDW_CVAE_Synthetic_Wells.zip",
+                            mime="application/zip",
+                            use_container_width=True,
+                            type="primary"
+                        )
+                    except Exception as e:
+                        st.error(f"Ошибка при формировании ZIP-архива: {str(e)}")
