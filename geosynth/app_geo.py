@@ -462,7 +462,7 @@ def plot_distribution_comparison(df_orig, df_synth, c_name):
 #     initial_sidebar_state="expanded",
 # )
 
-def run_geo_app():
+def run_geo_app_1():
     if st.sidebar.button("Вернуться на главную", use_container_width=True, key="btn_back_geo_sidebar"):
         st.session_state.current_page = 'home'
         st.rerun()

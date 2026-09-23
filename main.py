@@ -7,7 +7,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'geosynth'))
 
 # Импортирт функций из наших приложений
 from app_seis import run_seismic_app
-from app_geo import run_geo_app
+from app_geo_cvae import run_geo_app
 
 st.set_page_config(
     page_title="Модули генерации",

@@ -46,12 +46,12 @@ def render_interactive_segy_viewer(sgy_buffer, dt_ms):
                 max_val = 1
             traces_norm = traces / max_val
             
-            # Вкладки для разных режимов просмотра
-            tab1, tab2, tab3, tab4 = st.tabs([
+            # Вкладки для разных режимов просмотра (tab3, tab4 удалены)
+            tab1, tab2 = st.tabs([
                 "Сейсмический разрез", 
-                "Wiggle Trace",
-                "Variable Area Display",
-                "Заголовки трасс"
+                "Wiggle Trace"
+                # "Variable Area Display",
+                # "Заголовки трасс"
             ])
             
             # WIGGLE TRACE
@@ -71,7 +71,7 @@ def render_interactive_segy_viewer(sgy_buffer, dt_ms):
                     end_tr = st.number_input(
                         "Конечная трасса", 
                         start_tr+1, num_traces, 
-                        min(start_tr+50, num_traces),
+                        num_traces,
                         key="end_tr_wiggle"
                     )
                 with col_w3:
@@ -128,7 +128,7 @@ def render_interactive_segy_viewer(sgy_buffer, dt_ms):
                 with col_g2:
                     cmap = st.selectbox(
                         "Цветовая схема", 
-                        ['balance', 'RdBu', 'RdBu_r', 'gray', 'viridis', 'plasma', 'coolwarm'],
+                        ['balance', 'RdBu', 'RdBu_r', 'gray', 'viridis', 'plasma'],
                         index=0,  # По умолчанию 'balance'
                         key="cmap_heat"
                     )
@@ -201,174 +201,174 @@ def render_interactive_segy_viewer(sgy_buffer, dt_ms):
                         st.write(f"**Средняя амплитуда:** {np.mean(np.abs(traces)):.2f}")
                         st.write(f"**RMS амплитуда:** {np.sqrt(np.mean(traces**2)):.2f}")
                         
-            #  VARIABLE AREA DISPLAY (VAD)
-            with tab3:
-                st.markdown("### Variable Area Display (Закраска фаз)")
-                st.info("Закраска положительной (красная) и отрицательной (синяя) фаз")
+            # #  VARIABLE AREA DISPLAY (VAD)
+            # with tab3:
+            #     st.markdown("### Variable Area Display (Закраска фаз)")
+            #     st.info("Закраска положительной (красная) и отрицательной (синяя) фаз")
                 
-                col_v1, col_v2, col_v3 = st.columns([1, 1, 1])
-                with col_v1:
-                    start_tr_vad = st.number_input(
-                        "Начальная трасса", 
-                        0, num_traces-1, 0,
-                        key="start_tr_vad"
-                    )
-                with col_v2:
-                    end_tr_vad = st.number_input(
-                        "Конечная трасса", 
-                        start_tr_vad+1, num_traces,
-                        min(start_tr_vad+50, num_traces),
-                        key="end_tr_vad"
-                    )
-                with col_v3:
-                    gain_vad = st.slider(
-                        "Усиление", 
-                        0.1, 10.0, 1.0, 0.1,
-                        key="gain_vad"
-                    )
+            #     col_v1, col_v2, col_v3 = st.columns([1, 1, 1])
+            #     with col_v1:
+            #         start_tr_vad = st.number_input(
+            #             "Начальная трасса", 
+            #             0, num_traces-1, 0,
+            #             key="start_tr_vad"
+            #         )
+            #     with col_v2:
+            #         end_tr_vad = st.number_input(
+            #             "Конечная трасса", 
+            #             start_tr_vad+1, num_traces,
+            #             num_traces,
+            #             key="end_tr_vad"
+            #         )
+            #     with col_v3:
+            #         gain_vad = st.slider(
+            #             "Усиление", 
+            #             0.1, 10.0, 1.0, 0.1,
+            #             key="gain_vad"
+            #         )
                 
                 # Создание фигуры для VAD
-                fig_vad = go.Figure()
+            #     fig_vad = go.Figure()
                 
-                trace_indices_vad = np.arange(start_tr_vad, min(end_tr_vad, num_traces))
+            #     trace_indices_vad = np.arange(start_tr_vad, min(end_tr_vad, num_traces))
                 
-                for i, tr_idx in enumerate(trace_indices_vad):
-                    trace_data = traces_norm[tr_idx] * gain_vad
-                    x_offset = i * spacing
+            #     for i, tr_idx in enumerate(trace_indices_vad):
+            #         trace_data = traces_norm[tr_idx] * gain_vad
+            #         x_offset = i * spacing
                     
-                    # Положительная фаза (красная)
-                    fig_vad.add_trace(go.Scatter(
-                        x=x_offset + trace_data,
-                        y=time_axis,
-                        fill='tozerox',
-                        fillcolor='rgba(255, 0, 0, 0.4)',
-                        line=dict(color='black', width=0.5),
-                        hovertemplate=(
-                            f'<b>Трасса:</b> {tr_idx}<br>'
-                            '<b>Время:</b> %{y:.4f} с<br>'
-                            '<b>Амплитуда:</b> %{x:.4f}<br>'
-                            '<extra></extra>'
-                        ),
-                        showlegend=False
-                    ))
+            #         # Положительная фаза (красная)
+            #         fig_vad.add_trace(go.Scatter(
+            #             x=x_offset + trace_data,
+            #             y=time_axis,
+            #             fill='tozerox',
+            #             fillcolor='rgba(255, 0, 0, 0.4)',
+            #             line=dict(color='black', width=0.5),
+            #             hovertemplate=(
+            #                 f'<b>Трасса:</b> {tr_idx}<br>'
+            #                 '<b>Время:</b> %{y:.4f} с<br>'
+            #                 '<b>Амплитуда:</b> %{x:.4f}<br>'
+            #                 '<extra></extra>'
+            #             ),
+            #             showlegend=False
+            #         ))
                     
-                    # Отрицательная фаза (синяя)
-                    fig_vad.add_trace(go.Scatter(
-                        x=x_offset - trace_data,
-                        y=time_axis,
-                        fill='tozerox',
-                        fillcolor='rgba(0, 0, 255, 0.4)',
-                        line=dict(color='black', width=0.5),
-                        hovertemplate=(
-                            f'<b>Трасса:</b> {tr_idx}<br>'
-                            '<b>Время:</b> %{y:.4f} с<br>'
-                            '<b>Амплитуда:</b> %{x:.4f}<br>'
-                            '<extra></extra>'
-                        ),
-                        showlegend=False
-                    ))
+            #         # Отрицательная фаза (синяя)
+            #         fig_vad.add_trace(go.Scatter(
+            #             x=x_offset - trace_data,
+            #             y=time_axis,
+            #             fill='tozerox',
+            #             fillcolor='rgba(0, 0, 255, 0.4)',
+            #             line=dict(color='black', width=0.5),
+            #             hovertemplate=(
+            #                 f'<b>Трасса:</b> {tr_idx}<br>'
+            #                 '<b>Время:</b> %{y:.4f} с<br>'
+            #                 '<b>Амплитуда:</b> %{x:.4f}<br>'
+            #                 '<extra></extra>'
+            #             ),
+            #             showlegend=False
+            #         ))
                 
-                fig_vad.update_layout(
-                    title=f"Variable Area Display (Трассы {start_tr_vad} - {end_tr_vad-1})",
-                    xaxis_title="Номер трассы (со смещением)",
-                    yaxis_title="Время (с)",
-                    height=700,
-                    yaxis=dict(autorange="reversed"),
-                    xaxis=dict(showgrid=False, zeroline=False),
-                    hovermode='closest'
-                )
+            #     fig_vad.update_layout(
+            #         title=f"Variable Area Display (Трассы {start_tr_vad} - {end_tr_vad-1})",
+            #         xaxis_title="Номер трассы (со смещением)",
+            #         yaxis_title="Время (с)",
+            #         height=700,
+            #         yaxis=dict(autorange="reversed"),
+            #         xaxis=dict(showgrid=False, zeroline=False),
+            #         hovermode='closest'
+            #     )
                 
-                st.plotly_chart(fig_vad, use_container_width=True)
+            #     st.plotly_chart(fig_vad, use_container_width=True)
                 
-                # Легенда
-                st.markdown("""
-                <div style='padding: 10px; background-color: #f0f0f0; border-radius: 5px;'>
-                <b>Легенда:</b><br>
-                🔴 <span style='color: red;'>Красная закраска</span> - положительная фаза (пик)<br>
-                🔵 <span style='color: blue;'>Синяя закраска</span> - отрицательная фаза (впадина)
-                </div>
-                """, unsafe_allow_html=True)
+            #     # Легенда
+            #     st.markdown("""
+            #     <div style='padding: 10px; background-color: #f0f0f0; border-radius: 5px;'>
+            #     <b>Легенда:</b><br>
+            #     🔴 <span style='color: red;'>Красная закраска</span> - положительная фаза (пик)<br>
+            #     🔵 <span style='color: blue;'>Синяя закраска</span> - отрицательная фаза (впадина)
+            #     </div>
+            #     """, unsafe_allow_html=True)
             
-            # ЗАГОЛОВКИ ТРАСС
-            with tab4:
-                st.markdown("### Заголовки трасс (Trace Headers)")
-                st.info("Просмотр метаданных SEG-Y файла")
+            # # ЗАГОЛОВКИ ТРАСС
+            # with tab4:
+            #     st.markdown("### Заголовки трасс (Trace Headers)")
+            #     st.info("Просмотр метаданных SEG-Y файла")
                 
-                selected_tr = st.number_input(
-                    "Выберите трассу для просмотра заголовка", 
-                    0, num_traces-1, 0,
-                    key="selected_tr_header"
-                )
+            #     selected_tr = st.number_input(
+            #         "Выберите трассу для просмотра заголовка", 
+            #         0, num_traces-1, 0,
+            #         key="selected_tr_header"
+            #     )
                 
-                # Чтение заголовков
-                header = f.header[selected_tr]
+            #     # Чтение заголовков
+            #     header = f.header[selected_tr]
                 
-                # Основные поля заголовка
-                header_fields = [
-                    (segyio.TraceField.TraceNumber, "Номер трассы"),
-                    (segyio.TraceField.CDP, "CDP"),
-                    (segyio.TraceField.CDP_TRACE, "CDP Trace"),
-                    (segyio.TraceField.TRACE_SEQUENCE_LINE, "Последовательность (линия)"),
-                    (segyio.TraceField.TRACE_SEQUENCE_FILE, "Последовательность (файл)"),
-                    (segyio.TraceField.SourceX, "X источника"),
-                    (segyio.TraceField.SourceY, "Y источника"),
-                    (segyio.TraceField.GroupX, "X приемника"),
-                    (segyio.TraceField.GroupY, "Y приемника"),
-                    (segyio.TraceField.offset, "Offset"),
-                    (segyio.TraceField.ReceiverGroupElevation, "Высота приемника"),
-                    (segyio.TraceField.SourceSurfaceElevation, "Высота источника"),
-                ]
+            #     # Основные поля заголовка
+            #     header_fields = [
+            #         (segyio.TraceField.TraceNumber, "Номер трассы"),
+            #         (segyio.TraceField.CDP, "CDP"),
+            #         (segyio.TraceField.CDP_TRACE, "CDP Trace"),
+            #         (segyio.TraceField.TRACE_SEQUENCE_LINE, "Последовательность (линия)"),
+            #         (segyio.TraceField.TRACE_SEQUENCE_FILE, "Последовательность (файл)"),
+            #         (segyio.TraceField.SourceX, "X источника"),
+            #         (segyio.TraceField.SourceY, "Y источника"),
+            #         (segyio.TraceField.GroupX, "X приемника"),
+            #         (segyio.TraceField.GroupY, "Y приемника"),
+            #         (segyio.TraceField.offset, "Offset"),
+            #         (segyio.TraceField.ReceiverGroupElevation, "Высота приемника"),
+            #         (segyio.TraceField.SourceSurfaceElevation, "Высота источника"),
+            #     ]
                 
-                header_data = []
-                for field, description in header_fields:
-                    try:
-                        value = header[field]
-                        header_data.append({
-                            "Поле": description,
-                            "Код": field.name,
-                            "Значение": value
-                        })
-                    except:
-                        pass
+            #     header_data = []
+            #     for field, description in header_fields:
+            #         try:
+            #             value = header[field]
+            #             header_data.append({
+            #                 "Поле": description,
+            #                 "Код": field.name,
+            #                 "Значение": value
+            #             })
+            #         except:
+            #             pass
                 
-                st.dataframe(
-                    pd.DataFrame(header_data),
-                    use_container_width=True,
-                    height=400
-                )
+            #     st.dataframe(
+            #         pd.DataFrame(header_data),
+            #         use_container_width=True,
+            #         height=400
+            #     )
                 
-                # Бинарный заголовок файла
-                st.markdown("### Бинарный заголовок файла")
-                bin_header_data = []
-                bin_fields = [
-                    (segyio.BinField.Interval, "Интервал дискретизации (мкс)"),
-                    (segyio.BinField.Samples, "Количество отсчетов"),
-                    (segyio.BinField.Format, "Формат данных"),
-                ]
+            #     # Бинарный заголовок файла
+            #     st.markdown("### Бинарный заголовок файла")
+            #     bin_header_data = []
+            #     bin_fields = [
+            #         (segyio.BinField.Interval, "Интервал дискретизации (мкс)"),
+            #         (segyio.BinField.Samples, "Количество отсчетов"),
+            #         (segyio.BinField.Format, "Формат данных"),
+            #     ]
                 
-                for field, description in bin_fields:
-                    try:
-                        value = f.bin[field]
-                        bin_header_data.append({
-                            "Поле": description,
-                            "Код": field.name,
-                            "Значение": value
-                        })
-                    except:
-                        pass
+            #     for field, description in bin_fields:
+            #         try:
+            #             value = f.bin[field]
+            #             bin_header_data.append({
+            #                 "Поле": description,
+            #                 "Код": field.name,
+            #                 "Значение": value
+            #             })
+            #         except:
+            #             pass
                 
-                st.dataframe(
-                    pd.DataFrame(bin_header_data),
-                    use_container_width=True
-                )
+            #     st.dataframe(
+            #         pd.DataFrame(bin_header_data),
+            #         use_container_width=True
+            #     )
                 
-                # Текстовый заголовок
-                st.markdown("### Текстовый заголовок")
-                try:
-                    text_header = f.text[0].decode('ascii', errors='ignore')
-                    st.code(text_header, language='text')
-                except:
-                    st.warning("Не удалось прочитать текстовый заголовок")
+            #     # Текстовый заголовок
+            #     st.markdown("### Текстовый заголовок")
+            #     try:
+            #         text_header = f.text[0].decode('ascii', errors='ignore')
+            #         st.code(text_header, language='text')
+            #     except:
+            #         st.warning("Не удалось прочитать текстовый заголовок")
     
     finally:
         # Удаление временного файл
