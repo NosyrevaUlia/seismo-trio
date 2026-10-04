@@ -56,7 +56,7 @@ def render_interactive_segy_viewer(sgy_buffer, dt_ms):
             
             # WIGGLE TRACE
             with tab1:
-                st.markdown("### Wiggle Trace (Вейвлетная запись)")
+                #st.markdown("### Wiggle Trace (Вейвлетная запись)")
                 st.info("Классическое отображение сейсмических трасс в виде вейвлетов")
                 
                 col_w1, col_w2, col_w3 = st.columns([1, 1, 1])
@@ -108,7 +108,7 @@ def render_interactive_segy_viewer(sgy_buffer, dt_ms):
                 
                 fig_wiggle.update_layout(
                     title=f"Wiggle Trace (Трассы {start_tr} - {end_tr-1})",
-                    xaxis_title="Номер трассы (со смещением)",
+                    xaxis_title="Номер трассы",
                     yaxis_title="Время (с)",
                     height=700,
                     yaxis=dict(autorange="reversed"),
@@ -120,7 +120,7 @@ def render_interactive_segy_viewer(sgy_buffer, dt_ms):
 
             # СЕЙСМИЧЕСКИЙ РАЗРЕЗ (HEATMAP)
             with tab2:
-                st.markdown("### Сейсмический разрез (Heatmap)")
+                #st.markdown("### Сейсмический разрез (Heatmap)")
                 
                 col_g1, col_g2, col_g3 = st.columns([1, 1, 2])
                 with col_g1:
@@ -177,7 +177,7 @@ def render_interactive_segy_viewer(sgy_buffer, dt_ms):
                 
                 fig_heat.update_layout(
                     title=f"Сейсмический разрез ({num_traces} трасс × {num_samples} отсчетов)",
-                    xaxis_title="Номер трассы (CDP)",
+                    xaxis_title="Номер трассы",
                     yaxis_title="Время (с)",
                     height=700,
                     yaxis=dict(autorange="reversed"),
@@ -371,7 +371,6 @@ def render_interactive_segy_viewer(sgy_buffer, dt_ms):
             #         st.warning("Не удалось прочитать текстовый заголовок")
     
     finally:
-        # Удаление временного файл
         if os.path.exists(tmp_filename):
             os.unlink(tmp_filename)
 #============================================================================================================================================

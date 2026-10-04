@@ -10,7 +10,7 @@ from app_seis import run_seismic_app
 from app_geo_cvae import run_geo_app
 
 st.set_page_config(
-    page_title="Модули генерации",
+    page_title="SynthGeoGen",
     layout="wide"
 )
 
