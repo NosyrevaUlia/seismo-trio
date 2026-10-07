@@ -7,16 +7,15 @@ import io
 import segyio
 import tempfile
 import os
-
-
-#===============================================================================================================
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import plotly.express as px
 
+
+
 def render_interactive_segy_viewer(sgy_buffer, dt_ms):
     """
-    Интерактивный просмотрщик SEG-Y файлов.
+    Интерактивный просмотрщик SEG-Y файлов (стиль Seisee).
     Параметры:
     ----------
     sgy_buffer : io.BytesIO        буфер с SEG-Y данными
@@ -25,20 +24,18 @@ def render_interactive_segy_viewer(sgy_buffer, dt_ms):
     st.markdown("---")
     st.subheader("Интерактивный просмотрщик SEG-Y")
     
-    # Сохранение буфера во временный файл для segyio
     with tempfile.NamedTemporaryFile(suffix='.sgy', delete=False) as tmp_file:
         tmp_filename = tmp_file.name
         tmp_file.write(sgy_buffer.getvalue())
-        
+    
     try:
         with segyio.open(tmp_filename, ignore_geometry=True) as f:
             # Чтение всех данных
             traces = f.trace.raw[:]
             num_traces, num_samples = traces.shape
             
-            # Ось времени
-            dt_s = dt_ms / 1000.0
-            time_axis = np.arange(num_samples) * dt_s
+            # Ось отсчетов 
+            sample_axis = np.arange(num_samples)
             
             # Нормализация для отображения
             max_val = np.percentile(np.abs(traces), 98)
@@ -46,108 +43,103 @@ def render_interactive_segy_viewer(sgy_buffer, dt_ms):
                 max_val = 1
             traces_norm = traces / max_val
             
-            # Вкладки для разных режимов просмотра (tab3, tab4 удалены)
-            tab1, tab2 = st.tabs([
-                "Сейсмический разрез", 
-                "Wiggle Trace"
-                # "Variable Area Display",
-                # "Заголовки трасс"
-            ])
+            st.markdown("### Display Mode")
+            col_mode1, col_mode2, col_mode3, col_mode4 = st.columns(4)
             
-            # WIGGLE TRACE
-            with tab1:
-                #st.markdown("### Wiggle Trace (Вейвлетная запись)")
-                st.info("Классическое отображение сейсмических трасс в виде вейвлетов")
-                
-                col_w1, col_w2, col_w3 = st.columns([1, 1, 1])
-                with col_w1:
-                    start_tr = st.number_input(
-                        "Начальная трасса", 
-                        0, num_traces-1, 0,
-                        key="start_tr_wiggle"
-                    )
-                with col_w2:
-                    max_traces = min(num_traces, 200)
-                    end_tr = st.number_input(
-                        "Конечная трасса", 
-                        start_tr+1, num_traces, 
-                        num_traces,
-                        key="end_tr_wiggle"
-                    )
-                with col_w3:
-                    gain_wiggle = st.slider(
-                        "Усиление", 
-                        0.1, 10.0, 1.0, 0.1,
-                        key="gain_wiggle"
-                    )
-                
-                # Создание фигуры для wiggle
-                fig_wiggle = go.Figure()
-                
-                trace_indices = np.arange(start_tr, min(end_tr, num_traces))
-                spacing = 1.0
-                
+            with col_mode1:
+                show_wiggle = st.checkbox("Wiggle", value=True, key="show_wiggle_seisee")
+            with col_mode2:
+                show_gray = st.checkbox("Gray", value=False, key="show_gray_seisee")
+            with col_mode3:
+                show_color = st.checkbox("Color", value=False, key="show_color_seisee")
+            with col_mode4:
+                show_timelines = st.checkbox("Timelines", value=True, key="show_timelines_seisee")
+            
+            st.markdown("### Настройки отображения")
+            col_set1, col_set2, col_set3 = st.columns(3)
+            
+            with col_set1:
+                start_tr = st.number_input(
+                    "Начальная трасса", 
+                    0, num_traces-1, 0,
+                    key="start_tr_seisee"
+                )
+            with col_set2:
+                end_tr = st.number_input(
+                    "Конечная трасса", 
+                    start_tr+1, num_traces, 
+                    min(num_traces, start_tr + 200),
+                    key="end_tr_seisee"
+                )
+            with col_set3:
+                gain = st.slider(
+                    "Усиление (Gain)", 
+                    0.1, 10.0, 1.0, 0.1,
+                    key="gain_seisee"
+                )
+            
+            # Timelines
+            timeline_interval = 100
+            timeline_color = "#FF0000"
+           
+            fig = go.Figure()
+            
+            trace_indices = np.arange(start_tr, min(end_tr, num_traces))
+            spacing = 1.0
+            
+            # Wiggle Trace
+            if show_wiggle:
                 for i, tr_idx in enumerate(trace_indices):
-                    trace_data = traces_norm[tr_idx] * gain_wiggle
+                    trace_data = traces_norm[tr_idx] * gain
                     x_offset = i * spacing
-                    
-                    fig_wiggle.add_trace(go.Scatter(
+                    fig.add_trace(go.Scatter(
                         x=x_offset + trace_data,
-                        y=time_axis,
+                        y=sample_axis,
                         mode='lines',
                         line=dict(color='black', width=0.8),
                         name=f'Трасса {tr_idx}',
                         hovertemplate=(
                             f'<b>Трасса:</b> {tr_idx}<br>'
-                            '<b>Время:</b> %{y:.4f} с<br>'
+                            '<b>Отсчет:</b> %{y}<br>'
                             '<b>Амплитуда:</b> %{x:.4f}<br>'
                             '<extra></extra>'
                         ),
                         showlegend=False
                     ))
-                
-                fig_wiggle.update_layout(
-                    title=f"Wiggle Trace (Трассы {start_tr} - {end_tr-1})",
-                    xaxis_title="Номер трассы",
-                    yaxis_title="Время (с)",
-                    height=700,
-                    yaxis=dict(autorange="reversed"),
-                    xaxis=dict(showgrid=False, zeroline=False),
-                    hovermode='closest'
-                )
-                
-                st.plotly_chart(fig_wiggle, use_container_width=True)
-
-            # СЕЙСМИЧЕСКИЙ РАЗРЕЗ (HEATMAP)
-            with tab2:
-                #st.markdown("### Сейсмический разрез (Heatmap)")
-                
-                col_g1, col_g2, col_g3 = st.columns([1, 1, 2])
-                with col_g1:
-                    gain_heat = st.slider("Усиление (Gain)", 0.1, 10.0, 1.0, 0.1, key="gain_heat")
-                with col_g2:
-                    cmap = st.selectbox(
-                        "Цветовая схема", 
-                        ['balance', 'RdBu', 'RdBu_r', 'gray', 'viridis', 'plasma'],
-                        index=0,  # По умолчанию 'balance'
-                        key="cmap_heat"
-                    )
-                with col_g3:
-                    show_contours = st.checkbox("Показать контуры", value=False)
-
-                # Подготовка данных для heatmap
-                z_data = np.clip(traces_norm * gain_heat, -1, 1).T
-
-                fig_heat = go.Figure(data=go.Heatmap(
+            
+            # Gray
+            if show_gray:
+                z_data = np.clip(traces_norm * gain, -1, 1).T
+                fig.add_trace(go.Heatmap(
                     z=z_data,
-                    x=np.arange(num_traces),
-                    y=time_axis,
-                    colorscale=cmap,  
-                    zmin=-1, 
+                    x=np.arange(min(end_tr, num_traces)),
+                    y=sample_axis,
+                    colorscale='gray',
+                    zmin=-1,
                     zmax=1,
                     hovertemplate=(
                         '<b>Трасса:</b> %{x}<br>'
-                        '<b>Время:</b> %{y:.4f} с<br>'
+                        '<b>Отсчет:</b> %{y}<br>'
+                        '<b>Амплитуда:</b> %{z:.4f}<br>'
+                        '<extra></extra>'
+                    ),
+                    showscale=False,
+                    opacity=0.7
+                ))
+            
+            # Color 
+            if show_color:
+                z_data = np.clip(traces_norm * gain, -1, 1).T
+                fig.add_trace(go.Heatmap(
+                    z=z_data,
+                    x=np.arange(min(end_tr, num_traces)),
+                    y=sample_axis,
+                    colorscale='balance',
+                    zmin=-1,
+                    zmax=1,
+                    hovertemplate=(
+                        '<b>Трасса:</b> %{x}<br>'
+                        '<b>Отсчет:</b> %{y}<br>'
                         '<b>Амплитуда:</b> %{z:.4f}<br>'
                         '<extra></extra>'
                     ),
@@ -158,222 +150,49 @@ def render_interactive_segy_viewer(sgy_buffer, dt_ms):
                         len=0.8
                     )
                 ))
-                
-                # Добавление контуров если нужно
-                if show_contours:
-                    fig_heat.add_trace(go.Contour(
-                        z=z_data,
-                        x=np.arange(num_traces),
-                        y=time_axis,
-                        contours=dict(
-                            coloring='none',
-                            showlabels=True,
-                            labelfont=dict(size=10, color='white')
-                        ),
-                        line=dict(width=0.5, color='rgba(255,255,255,0.3)'),
-                        showscale=False,
-                        hoverinfo='skip'
-                    ))
-                
-                fig_heat.update_layout(
-                    title=f"Сейсмический разрез ({num_traces} трасс × {num_samples} отсчетов)",
-                    xaxis_title="Номер трассы",
-                    yaxis_title="Время (с)",
-                    height=700,
-                    yaxis=dict(autorange="reversed"),
-                    xaxis=dict(showgrid=False),
-                    hovermode='closest'
-                )
-                
-                st.plotly_chart(fig_heat, use_container_width=True)
-                
-                # Кнопка экспорта
-                col_exp1, col_exp2 = st.columns(2)
-                with col_exp1:
-                    if st.button("Экспорт в PNG", key="export_heat_png"):
-                        st.info("Используйте панель инструментов Plotly для сохранения изображения")
-                with col_exp2:
-                    if st.button("Статистика разреза", key="stats_heat"):
-                        st.write(f"**Количество трасс:** {num_traces}")
-                        st.write(f"**Отсчетов на трассу:** {num_samples}")
-                        st.write(f"**Длительность записи:** {time_axis[-1]:.3f} с")
-                        st.write(f"**Макс. амплитуда (до нормировки):** {max_val:.2f}")
-                        st.write(f"**Средняя амплитуда:** {np.mean(np.abs(traces)):.2f}")
-                        st.write(f"**RMS амплитуда:** {np.sqrt(np.mean(traces**2)):.2f}")
-                        
-            # #  VARIABLE AREA DISPLAY (VAD)
-            # with tab3:
-            #     st.markdown("### Variable Area Display (Закраска фаз)")
-            #     st.info("Закраска положительной (красная) и отрицательной (синяя) фаз")
-                
-            #     col_v1, col_v2, col_v3 = st.columns([1, 1, 1])
-            #     with col_v1:
-            #         start_tr_vad = st.number_input(
-            #             "Начальная трасса", 
-            #             0, num_traces-1, 0,
-            #             key="start_tr_vad"
-            #         )
-            #     with col_v2:
-            #         end_tr_vad = st.number_input(
-            #             "Конечная трасса", 
-            #             start_tr_vad+1, num_traces,
-            #             num_traces,
-            #             key="end_tr_vad"
-            #         )
-            #     with col_v3:
-            #         gain_vad = st.slider(
-            #             "Усиление", 
-            #             0.1, 10.0, 1.0, 0.1,
-            #             key="gain_vad"
-            #         )
-                
-                # Создание фигуры для VAD
-            #     fig_vad = go.Figure()
-                
-            #     trace_indices_vad = np.arange(start_tr_vad, min(end_tr_vad, num_traces))
-                
-            #     for i, tr_idx in enumerate(trace_indices_vad):
-            #         trace_data = traces_norm[tr_idx] * gain_vad
-            #         x_offset = i * spacing
-                    
-            #         # Положительная фаза (красная)
-            #         fig_vad.add_trace(go.Scatter(
-            #             x=x_offset + trace_data,
-            #             y=time_axis,
-            #             fill='tozerox',
-            #             fillcolor='rgba(255, 0, 0, 0.4)',
-            #             line=dict(color='black', width=0.5),
-            #             hovertemplate=(
-            #                 f'<b>Трасса:</b> {tr_idx}<br>'
-            #                 '<b>Время:</b> %{y:.4f} с<br>'
-            #                 '<b>Амплитуда:</b> %{x:.4f}<br>'
-            #                 '<extra></extra>'
-            #             ),
-            #             showlegend=False
-            #         ))
-                    
-            #         # Отрицательная фаза (синяя)
-            #         fig_vad.add_trace(go.Scatter(
-            #             x=x_offset - trace_data,
-            #             y=time_axis,
-            #             fill='tozerox',
-            #             fillcolor='rgba(0, 0, 255, 0.4)',
-            #             line=dict(color='black', width=0.5),
-            #             hovertemplate=(
-            #                 f'<b>Трасса:</b> {tr_idx}<br>'
-            #                 '<b>Время:</b> %{y:.4f} с<br>'
-            #                 '<b>Амплитуда:</b> %{x:.4f}<br>'
-            #                 '<extra></extra>'
-            #             ),
-            #             showlegend=False
-            #         ))
-                
-            #     fig_vad.update_layout(
-            #         title=f"Variable Area Display (Трассы {start_tr_vad} - {end_tr_vad-1})",
-            #         xaxis_title="Номер трассы (со смещением)",
-            #         yaxis_title="Время (с)",
-            #         height=700,
-            #         yaxis=dict(autorange="reversed"),
-            #         xaxis=dict(showgrid=False, zeroline=False),
-            #         hovermode='closest'
-            #     )
-                
-            #     st.plotly_chart(fig_vad, use_container_width=True)
-                
-            #     # Легенда
-            #     st.markdown("""
-            #     <div style='padding: 10px; background-color: #f0f0f0; border-radius: 5px;'>
-            #     <b>Легенда:</b><br>
-            #     🔴 <span style='color: red;'>Красная закраска</span> - положительная фаза (пик)<br>
-            #     🔵 <span style='color: blue;'>Синяя закраска</span> - отрицательная фаза (впадина)
-            #     </div>
-            #     """, unsafe_allow_html=True)
             
-            # # ЗАГОЛОВКИ ТРАСС
-            # with tab4:
-            #     st.markdown("### Заголовки трасс (Trace Headers)")
-            #     st.info("Просмотр метаданных SEG-Y файла")
-                
-            #     selected_tr = st.number_input(
-            #         "Выберите трассу для просмотра заголовка", 
-            #         0, num_traces-1, 0,
-            #         key="selected_tr_header"
-            #     )
-                
-            #     # Чтение заголовков
-            #     header = f.header[selected_tr]
-                
-            #     # Основные поля заголовка
-            #     header_fields = [
-            #         (segyio.TraceField.TraceNumber, "Номер трассы"),
-            #         (segyio.TraceField.CDP, "CDP"),
-            #         (segyio.TraceField.CDP_TRACE, "CDP Trace"),
-            #         (segyio.TraceField.TRACE_SEQUENCE_LINE, "Последовательность (линия)"),
-            #         (segyio.TraceField.TRACE_SEQUENCE_FILE, "Последовательность (файл)"),
-            #         (segyio.TraceField.SourceX, "X источника"),
-            #         (segyio.TraceField.SourceY, "Y источника"),
-            #         (segyio.TraceField.GroupX, "X приемника"),
-            #         (segyio.TraceField.GroupY, "Y приемника"),
-            #         (segyio.TraceField.offset, "Offset"),
-            #         (segyio.TraceField.ReceiverGroupElevation, "Высота приемника"),
-            #         (segyio.TraceField.SourceSurfaceElevation, "Высота источника"),
-            #     ]
-                
-            #     header_data = []
-            #     for field, description in header_fields:
-            #         try:
-            #             value = header[field]
-            #             header_data.append({
-            #                 "Поле": description,
-            #                 "Код": field.name,
-            #                 "Значение": value
-            #             })
-            #         except:
-            #             pass
-                
-            #     st.dataframe(
-            #         pd.DataFrame(header_data),
-            #         use_container_width=True,
-            #         height=400
-            #     )
-                
-            #     # Бинарный заголовок файла
-            #     st.markdown("### Бинарный заголовок файла")
-            #     bin_header_data = []
-            #     bin_fields = [
-            #         (segyio.BinField.Interval, "Интервал дискретизации (мкс)"),
-            #         (segyio.BinField.Samples, "Количество отсчетов"),
-            #         (segyio.BinField.Format, "Формат данных"),
-            #     ]
-                
-            #     for field, description in bin_fields:
-            #         try:
-            #             value = f.bin[field]
-            #             bin_header_data.append({
-            #                 "Поле": description,
-            #                 "Код": field.name,
-            #                 "Значение": value
-            #             })
-            #         except:
-            #             pass
-                
-            #     st.dataframe(
-            #         pd.DataFrame(bin_header_data),
-            #         use_container_width=True
-            #     )
-                
-            #     # Текстовый заголовок
-            #     st.markdown("### Текстовый заголовок")
-            #     try:
-            #         text_header = f.text[0].decode('ascii', errors='ignore')
-            #         st.code(text_header, language='text')
-            #     except:
-            #         st.warning("Не удалось прочитать текстовый заголовок")
+            # Timelines
+            if show_timelines:
+                timeline_samples = np.arange(0, num_samples, timeline_interval)
+                for t_sample in timeline_samples:
+                    fig.add_shape(
+                        type="line",
+                        x0=start_tr,
+                        y0=t_sample,
+                        x1=min(end_tr, num_traces) - 1,
+                        y1=t_sample,
+                        line=dict(color=timeline_color, width=1, dash="dash"),
+                        opacity=0.5
+                    )
+            
+            # Зум колёсиком
+            fig.update_layout(
+                title=f"SEG-Y Viewer (Трассы {start_tr} - {min(end_tr, num_traces)-1})",
+                xaxis_title="Номер трассы",
+                yaxis_title="Отсчет (Sample)",
+                height=700,
+                yaxis=dict(autorange="reversed"),
+                xaxis=dict(showgrid=False, zeroline=False),
+                hovermode='closest',
+                dragmode='pan' 
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Статистика
+            col_exp1, col_exp2 = st.columns(2)
+            with col_exp1:
+                if st.button("Статистика разреза", key="stats_seisee"):
+                    st.write(f"**Количество трасс:** {num_traces}")
+                    st.write(f"**Отсчетов на трассу:** {num_samples}")
+                    st.write(f"**Длительность записи:** {num_samples * dt_ms / 1000:.3f} с")
+                    st.write(f"**Макс. амплитуда (до нормировки):** {max_val:.2f}")
+                    st.write(f"**Средняя амплитуда:** {np.mean(np.abs(traces)):.2f}")
+                    st.write(f"**RMS амплитуда:** {np.sqrt(np.mean(traces**2)):.2f}")
     
     finally:
         if os.path.exists(tmp_filename):
             os.unlink(tmp_filename)
-#============================================================================================================================================
 
 
 def save_traces_to_sgy(traces, dt_ms, filename="synthetic_section.sgy", 
