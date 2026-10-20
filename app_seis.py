@@ -171,13 +171,21 @@ def render_interactive_segy_viewer(sgy_buffer, dt_ms):
                 xaxis_title="Номер трассы",
                 yaxis_title="Отсчет (Sample)",
                 height=700,
-                yaxis=dict(autorange="reversed"),
-                xaxis=dict(showgrid=False, zeroline=False),
+                yaxis=dict(autorange="reversed", fixedrange=False),
+                xaxis=dict(showgrid=False, zeroline=False, fixedrange=False),
                 hovermode='closest',
                 dragmode='pan' 
             )
             
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(
+                fig, use_container_width=True,
+                config={
+                    'scrollZoom': True, 
+                    'displayModeBar': True, 
+                    'modeBarButtonsToRemove': ['lasso2d', 'select2d'],
+                    'displaylogo': False
+                }
+)
             
             # Статистика
             col_exp1, col_exp2 = st.columns(2)
