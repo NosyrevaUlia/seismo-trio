@@ -1,0 +1,6 @@
+[theme]
+primaryColor = "#8B5CF6"             # Нежный фиолетовый (акценты)
+backgroundColor = "#F8FAFC"          # Очень светлый, воздушный фон
+secondaryBackgroundColor = "#F1F5F9" # Чуть более плотный для сайдбара
+textColor = "#1E1B4B"                # Глубокий индиго (вместо черного)
+font = "sans serif"

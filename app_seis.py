@@ -21,8 +21,8 @@ def render_interactive_segy_viewer(sgy_buffer, dt_ms):
     sgy_buffer : io.BytesIO        буфер с SEG-Y данными
     dt_ms : float                  интервал дискретизации в миллисекундах
     """
-    st.markdown("---")
-    st.subheader("Интерактивный просмотрщик SEG-Y")
+    #st.markdown("---")
+    #st.subheader("Интерактивный просмотрщик SEG-Y")
     
     with tempfile.NamedTemporaryFile(suffix='.sgy', delete=False) as tmp_file:
         tmp_filename = tmp_file.name
@@ -42,8 +42,10 @@ def render_interactive_segy_viewer(sgy_buffer, dt_ms):
             if max_val == 0:
                 max_val = 1
             traces_norm = traces / max_val
+
+
+            st.subheader("Настройки отображения")
             
-            st.markdown("### Display Mode")
             col_mode1, col_mode2, col_mode3, col_mode4 = st.columns(4)
             
             with col_mode1:
@@ -55,20 +57,19 @@ def render_interactive_segy_viewer(sgy_buffer, dt_ms):
             with col_mode4:
                 show_timelines = st.checkbox("Timelines", value=True, key="show_timelines_seisee")
             
-            st.markdown("### Настройки отображения")
             col_set1, col_set2, col_set3 = st.columns(3)
-            
+
             with col_set1:
                 start_tr = st.number_input(
-                    "Начальная трасса", 
-                    0, num_traces-1, 0,
+                    "Начальная трасса",
+                    1, num_traces, 1,  # Начинаем с 1
                     key="start_tr_seisee"
                 )
             with col_set2:
                 end_tr = st.number_input(
-                    "Конечная трасса", 
-                    start_tr+1, num_traces, 
-                    min(num_traces, start_tr + 200),
+                    "Конечная трасса",
+                    start_tr, num_traces,  # Минимум теперь равен start_tr
+                    min(num_traces, start_tr + 199),
                     key="end_tr_seisee"
                 )
             with col_set3:
@@ -83,23 +84,24 @@ def render_interactive_segy_viewer(sgy_buffer, dt_ms):
             timeline_color = "#FF0000"
            
             fig = go.Figure()
-            
-            trace_indices = np.arange(start_tr, min(end_tr, num_traces))
+
+            # Вычитаем 1, так как внутри Python индексы начинаются с 0
+            trace_indices = np.arange(start_tr - 1, min(end_tr, num_traces))
             spacing = 1.0
             
             # Wiggle Trace
             if show_wiggle:
                 for i, tr_idx in enumerate(trace_indices):
                     trace_data = traces_norm[tr_idx] * gain
-                    x_offset = i * spacing
+                    x_offset = (start_tr + i) * spacing
                     fig.add_trace(go.Scatter(
                         x=x_offset + trace_data,
                         y=sample_axis,
                         mode='lines',
                         line=dict(color='black', width=0.8),
-                        name=f'Трасса {tr_idx}',
+                        name=f'Трасса {tr_idx + 1}',
                         hovertemplate=(
-                            f'<b>Трасса:</b> {tr_idx}<br>'
+                            f'<b>Трасса:</b> {tr_idx + 1}<br>'
                             '<b>Отсчет:</b> %{y}<br>'
                             '<b>Амплитуда:</b> %{x:.4f}<br>'
                             '<extra></extra>'
@@ -128,13 +130,15 @@ def render_interactive_segy_viewer(sgy_buffer, dt_ms):
                 ))
             
             # Color 
+            # Color
             if show_color:
                 z_data = np.clip(traces_norm * gain, -1, 1).T
                 fig.add_trace(go.Heatmap(
                     z=z_data,
                     x=np.arange(min(end_tr, num_traces)),
                     y=sample_axis,
-                    colorscale='balance',
+                    # --- ИЗМЕНЕНА ПАЛИТРА ---
+                    colorscale='PuBu',
                     zmin=-1,
                     zmax=1,
                     hovertemplate=(
@@ -145,9 +149,10 @@ def render_interactive_segy_viewer(sgy_buffer, dt_ms):
                     ),
                     showscale=True,
                     colorbar=dict(
-                        title="Норм. амплитуда",
-                        thickness=20,
-                        len=0.8
+                        title="Амплитуда",
+                        thickness=15,
+                        len=0.8,
+                        tickfont=dict(color="#1E1B4B")  # Темный текст для шкалы
                     )
                 ))
             
@@ -159,22 +164,26 @@ def render_interactive_segy_viewer(sgy_buffer, dt_ms):
                         type="line",
                         x0=start_tr,
                         y0=t_sample,
-                        x1=min(end_tr, num_traces) - 1,
+                        x1=min(end_tr, num_traces),
                         y1=t_sample,
                         line=dict(color=timeline_color, width=1, dash="dash"),
                         opacity=0.5
                     )
-            
+
             # Зум колёсиком
             fig.update_layout(
-                title=f"SEG-Y Viewer (Трассы {start_tr} - {min(end_tr, num_traces)-1})",
+                title=f"SEG-Y Viewer (Трассы {start_tr} - {min(end_tr, num_traces)})",
                 xaxis_title="Номер трассы",
                 yaxis_title="Отсчет (Sample)",
                 height=700,
                 yaxis=dict(autorange="reversed", fixedrange=False),
                 xaxis=dict(showgrid=False, zeroline=False, fixedrange=False),
                 hovermode='closest',
-                dragmode='pan' 
+                dragmode='pan',
+                # --- НОВЫЕ СТРОКИ ---
+                plot_bgcolor='rgba(255, 255, 255, 0.3)',
+                paper_bgcolor='rgba(0,0,0,0)',
+                font=dict(family="Segoe UI, sans-serif", color="#1E1B4B")
             )
             
             st.plotly_chart(
@@ -185,7 +194,7 @@ def render_interactive_segy_viewer(sgy_buffer, dt_ms):
                     'modeBarButtonsToRemove': ['lasso2d', 'select2d'],
                     'displaylogo': False
                 }
-)
+            )
             
             # Статистика
             col_exp1, col_exp2 = st.columns(2)
@@ -713,27 +722,21 @@ def run_seismic_app():
 
     #  БОКОВАЯ ПАНЕЛЬ С ПАРАМЕТРАМИ
     st.sidebar.header("⚙️ Параметры модели")
-
     # ЧЕКБОКСЫ ДЛЯ ГИБРИДНОГО ГЕНЕРАТОРА
     st.sidebar.subheader("Режимы генерации")
     use_mc = st.sidebar.checkbox("Учитывать неопределённость (Монте-Карло)", value=False)
     use_trends = st.sidebar.checkbox("Учитывать неоднородность слоёв", value=False)
     enable_lateral = st.sidebar.checkbox("Включить латеральные изменения", value=False)
-
     # Длина трассы
     st.sidebar.subheader("Параметры трассы")
-
     # Количество горизонтов
     num_horizons = st.sidebar.slider("Количество отражающих горизонтов", 1, 20, 3)
-
     # Параметры дискретизации
     dt = st.sidebar.number_input("Интервал дискретизации dt (мс)",
-                                min_value=0.5, max_value=4.0, value=1.0) / 1000
-
+                                min_value=0.5, max_value=8.0, value=0.5, step=0.5) / 1000
     # Длительность записи (до 5 секунд)
     total_time = st.sidebar.number_input("Длительность записи (с)",
                                         min_value=0.5, max_value=5.0, value=5.0)
-
 
     # Латеральные изменения
     if enable_lateral:
@@ -759,14 +762,11 @@ def run_seismic_app():
         )
 
     # Параметры вейвлета
-    wavelet_freq = st.sidebar.slider("Частота вейвлета (Гц)", 5, 500, 30)
-
+    wavelet_freq = st.sidebar.slider("Частота вейвлета (Гц)", 1, 500, 30)
     # Уровень шума
     noise_std = st.sidebar.slider("Уровень шума", 0.0, 1.0, 0.0)
-
     # Амплитуда
-    amplitude = st.sidebar.slider("Амплитуда", 50, 2500, 1000)
-
+    amplitude = st.sidebar.slider("Амплитуда", 50, 10000, 1000)
     # Количество трасс
     num_traces_to_generate = st.sidebar.number_input(
         "Количество трасс для генерации",
@@ -812,13 +812,13 @@ def run_seismic_app():
     velocities = []
     densities = []
 
-    # Слой 0
+    # Слой 1
     velocities.append(st.sidebar.number_input(
-        "Скорость слоя 0 (м/с)",
+        "Скорость слоя 1 (м/с)",
         min_value=500, max_value=6000, value=default_velocities[0]
     ))
     densities.append(st.sidebar.number_input(
-        "Плотность слоя 0 (кг/м³)",
+        "Плотность слоя 1 (кг/м³)",
         min_value=1500, max_value=3500, value=default_densities[0]
     ))
 
@@ -826,11 +826,11 @@ def run_seismic_app():
     layer_trends = []
     for i in range(num_horizons):
         st.sidebar.markdown(f"---")
-        st.sidebar.markdown(f"**Горизонт {i + 1}**")
+        st.sidebar.markdown(f"**Горизонт {i + 2}**")
 
         depth_val = default_depths[i + 1] if i + 1 < len(default_depths) else 500 + i * 500
         depth = st.sidebar.number_input(
-            f"Глубина границы {i + 1} (м)",
+            f"Глубина границы {i + 2} (м)",
             min_value=100, max_value=MAX_DEPTH,
             value=depth_val
         )
@@ -838,14 +838,14 @@ def run_seismic_app():
 
         v_val = default_velocities[i + 1] if i + 1 < len(default_velocities) else 2000 + (i + 1) * 300
         v = st.sidebar.number_input(
-            f"Скорость слоя {i + 1} (м/с)",
+            f"Скорость слоя {i + 2} (м/с)",
             min_value=500, max_value=6000, value=v_val
         )
         velocities.append(v)
 
         rho_val = default_densities[i + 1] if i + 1 < len(default_densities) else 2200 + i * 100
         rho = st.sidebar.number_input(
-            f"Плотность слоя {i + 1} (кг/м³)",
+            f"Плотность слоя {i + 2} (кг/м³)",
             min_value=1500, max_value=3500, value=rho_val
         )
         densities.append(rho)
@@ -875,74 +875,45 @@ def run_seismic_app():
             # Если микрослоистость выключена, добавляем пустые тренды
             layer_trends.append({'type': 'none'})
 
+    if depths != sorted(depths):
+        st.error("Проверьте корректность введённых параметров (глубины должны возрастать).")
+
     # ГЕНЕРАЦИЯ И ОТОБРАЖЕНИЕ
     try:
-        # Гибридный генератор с амплитудой
+        # Инициализация и генерация базовой трассы
         hybrid_gen = HybridGenerator(
             wavelet_freq=wavelet_freq,
             dt=dt,
             total_time=total_time,
             noise_level=noise_std,
-            amplitude=amplitude  # Передаём амплитуду
+            amplitude=amplitude
         )
-
-        # Распределения для Монте-Карло
+        
         distributions = {
             'velocities': [{'type': 'normal', 'mu': v, 'sigma': v * 0.05} for v in velocities],
             'densities': [{'type': 'normal', 'mu': r, 'sigma': r * 0.03} for r in densities],
             'depths': [{'type': 'uniform', 'low': d * 0.9, 'high': d * 1.1} for d in depths]
         }
-
-        # Трассу через гибридный генератор
+        
         result = hybrid_gen.generate_trace(
             distributions, layer_trends,
             use_mc=use_mc,
             use_trends=use_trends,
             seed=42
         )
-
         trace = result['trace']
         time_axis = result['time_axis']
         mode = result['mode']
-
-        # НЕ обрезаем трассу, а используем как есть
-        # Если нужно изменить длину - делаем интерполяцию или ресэмплинг
-
+        
         st.header("Результат генерации")
         st.info(f"Режим: **{mode}** | Длина трассы: {len(trace)} отсчетов | Время записи: {time_axis[-1]:.2f} с")
 
-        # Основной график
-        fig, ax = plt.subplots(figsize=(12, 6))
-        ax.plot(time_axis, trace, 'b-', linewidth=1.5, label='Синтетическая трасса')
-
-        # Отметки горизонтов
-        rc = ReflectionCoefficients(result['depths'], result['velocities'], result['densities'])
-        for i, t in enumerate(rc.two_way_times):
-            if t < time_axis[-1]:
-                ax.axvline(x=t, color='red', linestyle='--', alpha=0.7,
-                        label=f'Горизонт {i + 1}: t={t:.3f}c, R={rc.reflection_coeffs[i]:.3f}' if i == 0 else "")
-
-        ax.set_xlabel('Время (с)')
-        ax.set_ylabel('Амплитуда')
-        ax.set_title(f'Синтетическая сейсмическая трасса ({mode})')
-        ax.grid(True)
-        ax.legend()
-
-
-
-
-        st.pyplot(fig)
-
+        # Генерация данных ансамбля трасс 
+        traces_ensemble = None
         if num_traces_to_generate > 1:
-            st.subheader("Ансамбль синтетических трасс")
-            
-            with st.spinner(f"Генерация {num_traces_to_generate} трасс..."):
-                traces_ensemble = []
-                
+            with st.spinner(f"Генерация {num_traces_to_generate} трасс для просмотрщика..."):
                 if enable_lateral:
-                    # Режим с латеральными изменениями
-                    horizon_idx = horizon_to_vary - 1  # Переводим в 0-индексацию
-                    
+                    horizon_idx = horizon_to_vary - 1
                     traces_ensemble, time_axis_ensemble, depths_varied = hybrid_gen.generate_section_with_lateral_variations(
                         depths_base=result['depths'],
                         velocities=result['velocities'],
@@ -956,158 +927,59 @@ def run_seismic_app():
                         distributions=distributions if use_mc else None,
                         layer_trends=layer_trends if use_trends else None
                     )
-                    
-                    # Информация о генерации
                     st.info(f"Латеральные изменения: {variation_type}, амплитуда {variation_amplitude} м, горизонт {horizon_to_vary}")
                 else:
-                    # Параметры из уже сгенерированной трассы
-                    base_depths = result['depths']
-                    base_velocities = result['velocities']
-                    base_densities = result['densities']
-                    
-                    # Генерируем множество трасс
+                    traces_list = []
                     for i in range(num_traces_to_generate):
                         if use_mc:
-                            # Монте-Карло: каждая трасса со случайными параметрами
                             depths_i, velocities_i, densities_i = HybridGenerator.sample_geology(distributions)
-                            
-                            # Тренды с вариациями для Монте-Карло
                             if use_trends:
                                 layer_trends_i = []
                                 for trend in layer_trends:
+                                    trend_i = trend.copy()
                                     if trend['type'] == 'linear':
-                                        trend_i = trend.copy()
                                         trend_i['k'] = trend['k'] * (1 + np.random.randn() * 0.1)
                                     elif trend['type'] == 'sinusoidal':
-                                        trend_i = trend.copy()
                                         trend_i['A'] = trend['A'] * (1 + np.random.randn() * 0.1)
                                         trend_i['L'] = trend['L'] * (1 + np.random.randn() * 0.1)
                                     elif trend['type'] == 'random':
-                                        trend_i = trend.copy()
                                         trend_i['sigma'] = trend['sigma'] * (1 + np.random.randn() * 0.1)
-                                    else:
-                                        trend_i = trend.copy()
                                     layer_trends_i.append(trend_i)
                             else:
                                 layer_trends_i = layer_trends
-                            
-                            # Генерация трассы со случайным seed
-                            result_i = hybrid_gen.generate_trace(
-                                distributions, layer_trends_i,
-                                use_mc=use_mc,
-                                use_trends=use_trends,
-                                seed=None    # Установить seed для Монте-Карло
-                            )
+                            result_i = hybrid_gen.generate_trace(distributions, layer_trends_i, use_mc=use_mc, use_trends=use_trends, seed=None)
                         else:
-                            # Детерминированный режим: ВСЕ ТРАССЫ ИДЕНТИЧНЫЕ. Проблема - нет режима вариации без Монте-Карло как такового
-                            result_i = hybrid_gen.generate_trace(
-                                distributions, layer_trends,
-                                use_mc=use_mc,
-                                use_trends=use_trends,
-                                seed=42  # Фиксированный seed
-                            )
-                        
-                        traces_ensemble.append(result_i['trace'])
-                    
-                    traces_ensemble = np.array(traces_ensemble)
+                            result_i = hybrid_gen.generate_trace(distributions, layer_trends, use_mc=use_mc, use_trends=use_trends, seed=42)
+                        traces_list.append(result_i['trace'])
+                    traces_ensemble = np.array(traces_list)
 
+        # Создание буфера SEG-Y и вызов интерактивного просмотрщика
+        sgy_buffer = None
+        if traces_ensemble is not None and len(traces_ensemble) > 0:
+            with tempfile.NamedTemporaryFile(suffix='.sgy', delete=False) as tmp_file:
+                tmp_filename = tmp_file.name
+            try:
+                save_traces_to_sgy(
+                    traces=traces_ensemble,
+                    dt_ms=dt * 1000,
+                    filename=tmp_filename,
+                    title=f"Синтетический разрез ({mode})"
+                )
+                with open(tmp_filename, 'rb') as f:
+                    sgy_buffer = io.BytesIO(f.read())
+            finally:
+                if os.path.exists(tmp_filename):
+                    os.unlink(tmp_filename)
             
-            # Вертикальный график ансамбля (как в SEG-Y)
-            fig_ensemble, ax_ensemble = plt.subplots(figsize=(12, 10))
-            
-            # Масштаб для отображения
-            max_amplitude = np.max(np.abs(traces_ensemble))
-            if max_amplitude > 0:
-                # Нормализуем трассы
-                normalized_traces = traces_ensemble / max_amplitude
-                
-                # Трассы вертикально (как в сейсмических разрезах)
-                trace_spacing = 1.0
-                num_show = min(len(traces_ensemble), 200)
-                
-                # Режим для подписи
-                if use_mc:
-                    plot_title = f'Ансамбль трасс (Монте-Карло, n={len(traces_ensemble)})'
-                    line_color = 'k-'
-                    line_width = 0.6
-                    alpha = 0.5
-                else:
-                    plot_title = f'Ансамбль трасс (Детерминированный, n={len(traces_ensemble)})'
-                    line_color = 'k-'
-                    line_width = 0.8
-                    alpha = 0.7
+            # Интерактивный просотрщик
+            render_interactive_segy_viewer(sgy_buffer, dt_ms=dt * 1000)
 
-                # Для каждой трассы: X = номер трассы, Y = время, амплитуда = смещение по X
-                for i in range(num_show):
-                    # Смещение трассы по X (номер трассы)
-                    x_offset = i * trace_spacing
-                    # Амплитуда добавляется/вычитается от центральной линии
-                    x_positions = x_offset + normalized_traces[i] * 0.8
-                    # Время идет по оси Y (вертикально)
-                    y_positions = time_axis
-                    
-                    ax_ensemble.plot(
-                        x_positions, 
-                        y_positions, 
-                        line_color, 
-                        linewidth=line_width, 
-                        alpha=alpha
-                    )
-                
-                # Настройки графика (как в сейсмических разрезах)
-                ax_ensemble.set_xlabel('Номер трассы')
-                ax_ensemble.set_ylabel('Время (с)')
-                ax_ensemble.set_title(plot_title)
-                ax_ensemble.grid(True, alpha=0.2)
-                
-                # Ось Y (время возрастает вниз, как в сейсмике)
-                ax_ensemble.invert_yaxis()
-                
-                # Настройка осей
-                ax_ensemble.set_xlim(-1.5, num_show * trace_spacing + 1.5)
-                ax_ensemble.set_ylim(time_axis[-1], 0)  # Время сверху вниз
-                
-                # Отметки горизонтальных линий (горизонты)
-                # Горизонты теперь будут горизонтальными линиями на определенных временах
-                rc_ensemble = ReflectionCoefficients(result['depths'], result['velocities'], result['densities'])
-                for t in rc_ensemble.two_way_times:
-                    if t < time_axis[-1]:
-                        ax_ensemble.axhline(y=t, color='red', linestyle='--', alpha=0.5, linewidth=1)
-                
-                # Цветовая шкала или подписи
-                # Номера трасс на оси X
-                if num_show <= 50:
-                    x_ticks = np.arange(0, num_show * trace_spacing, trace_spacing * max(1, num_show // 10))
-                    x_labels = [f"{int(i)}" for i in x_ticks / trace_spacing]
-                    ax_ensemble.set_xticks(x_ticks)
-                    ax_ensemble.set_xticklabels(x_labels)
-                
-                # # Подписи к горизонтам
-                # for i, t in enumerate(rc_ensemble.two_way_times):
-                #     if t < time_axis[-1]:
-                #         ax_ensemble.text(
-                #             num_show * trace_spacing * 0.02, 
-                #             t, 
-                #             f' Г{rc_ensemble.reflection_coeffs[i]:.3f}', 
-                #             color='red', 
-                #             fontsize=8,
-                #             va='center'
-                #         )
-                
-                st.pyplot(fig_ensemble)
-                plt.close(fig_ensemble)
-                
-
-
-        plt.close(fig)
-
-        # Включены латеральные изменения - график вариаций глубин
+                # График вариаций глубин (если включен)
         if enable_lateral and 'depths_varied' in locals():
             st.subheader("Вариации глубин горизонта")
             fig_var, ax_var = plt.subplots(figsize=(12, 4))
             ax_var.plot(np.arange(len(depths_varied)), depths_varied, 'b-', linewidth=2)
-            ax_var.axhline(y=result['depths'][horizon_idx], color='r', linestyle='--', 
-                        label=f'Базовое значение: {result["depths"][horizon_idx]:.1f} м')
+            ax_var.axhline(y=result['depths'][horizon_idx], color='r', linestyle='--', label=f'Базовое значение: {result["depths"][horizon_idx]:.1f} м')
             ax_var.set_xlabel('Номер трассы')
             ax_var.set_ylabel('Глубина (м)')
             ax_var.set_title(f'Изменение глубины горизонта {horizon_to_vary} ({variation_type})')
@@ -1115,13 +987,31 @@ def run_seismic_app():
             ax_var.legend()
             st.pyplot(fig_var)
             plt.close(fig_var)
+        
+        st.markdown("---")
+        st.subheader("Детальный анализ базовой трассы")
+
+        # Основной график одиночной трассы
+        fig, ax = plt.subplots(figsize=(11, 4))
+        ax.plot(time_axis, trace, 'b-', linewidth=1.5, label='Синтетическая трасса')
+        rc = ReflectionCoefficients(result['depths'], result['velocities'], result['densities'])
+        for i, t in enumerate(rc.two_way_times):
+            if t < time_axis[-1]:
+                ax.axvline(x=t, color='red', linestyle='--', alpha=0.7, label=f'Горизонт {i + 1}' if i == 0 else "")
+        ax.set_xlabel('Время (с)')
+        ax.set_ylabel('Амплитуда')
+        ax.set_title(f'Синтетическая сейсмическая трасса ({mode})')
+        ax.grid(True)
+        ax.legend()
+        st.pyplot(fig)
+        plt.close(fig)
+
 
         # Вейвлет и коэффициенты
         col1, col2 = st.columns(2)
-
         with col1:
             wav_time, wav_vals = hybrid_gen.trace_gen.wavelet_time, hybrid_gen.trace_gen.wavelet
-            fig2, ax2 = plt.subplots(figsize=(6, 3))
+            fig2, ax2 = plt.subplots(figsize=(4, 2))
             ax2.plot(wav_time, wav_vals)
             ax2.set_title(f'Вейвлет Рикера, f={wavelet_freq} Гц')
             ax2.set_xlabel('Время (с)')
@@ -1129,7 +1019,6 @@ def run_seismic_app():
             ax2.grid(True)
             st.pyplot(fig2)
             plt.close(fig2)
-
         with col2:
             fig3, ax3 = plt.subplots(figsize=(6, 3))
             times_show = [t for t in rc.two_way_times if t < time_axis[-1]]
@@ -1144,9 +1033,9 @@ def run_seismic_app():
             plt.close(fig3)
 
         # Спектр
+        st.markdown("---")
         st.subheader("Спектральный анализ")
         col3, col4 = st.columns(2)
-
         with col3:
             fig4, ax4 = plt.subplots(figsize=(6, 3))
             freq = np.fft.rfftfreq(len(trace), d=dt)
@@ -1159,7 +1048,6 @@ def run_seismic_app():
             ax4.grid(True)
             st.pyplot(fig4)
             plt.close(fig4)
-
         with col4:
             analytic = hilbert(trace)
             envelope = np.abs(analytic)
@@ -1173,8 +1061,8 @@ def run_seismic_app():
             plt.close(fig5)
 
         # Таблицы
-        st.header("Параметры модели")
-
+        st.markdown("---")
+        st.subheader("Параметры модели")
         model_data = []
         for i in range(len(result['depths']) + 1):
             model_data.append({
@@ -1184,7 +1072,7 @@ def run_seismic_app():
                 "Z (ρ·V)": result['velocities'][i] * result['densities'][i]
             })
         st.table(model_data)
-
+        
         boundaries_data = []
         for i in range(len(result['depths'])):
             if rc.two_way_times[i] < time_axis[-1]:
@@ -1198,57 +1086,25 @@ def run_seismic_app():
             st.table(boundaries_data)
 
         # Экспорт
+        st.markdown("---")
         st.subheader("💾 Экспорт")
         df = pd.DataFrame({"Время (с)": time_axis, "Амплитуда": trace})
         csv = df.to_csv(index=False)
         st.download_button("Скачать трассу (CSV)", csv, "trace.csv", "text/csv")
-
+        
         np_buffer = io.BytesIO()
         np.save(np_buffer, trace)
         st.download_button("Скачать трассу (NPY)", np_buffer.getvalue(), "trace.npy", "application/octet-stream")
-
-
-
-
-        # Экспорт всех трасс в SEG-Y
-        if 'traces_ensemble' in locals() and traces_ensemble is not None and len(traces_ensemble) > 0:
-            sgy_buffer = io.BytesIO()
-            
-            
-            with tempfile.NamedTemporaryFile(suffix='.sgy', delete=False) as tmp_file:
-                tmp_filename = tmp_file.name
-            
-            try:
-                # Save ансамбль трасс в SEG-Y
-                save_traces_to_sgy(
-                    traces=traces_ensemble,
-                    dt_ms=dt * 1000,
-                    filename=tmp_filename,
-                    title=f"Синтетический разрез ({mode})"
-                )
-                
-                # Read файл в буфер
-                with open(tmp_filename, 'rb') as f:
-                    sgy_buffer = io.BytesIO(f.read())
-                
-                st.download_button(
-                    label=f"Скачать все трассы SEG-Y",
-                    data=sgy_buffer.getvalue(),
-                    file_name="generated_traces.sgy",
-                    mime="application/octet-stream"
-                )
-            finally:
-                # К чертям временный файл
-                if os.path.exists(tmp_filename):
-                    os.unlink(tmp_filename)
-
-            
-
-        # ЭЭЭЭЭЭЭЭЭЭЭЭЭЭЭЭЭЭЭЭЭЭЭЭЭЭЭЭЭЭЭЭЭЭЭЭЭЭЭЭЭЭЭЭЭЭЭЭ
-        if 'sgy_buffer' in locals() and sgy_buffer is not None:
-            render_interactive_segy_viewer(sgy_buffer, dt_ms=dt * 1000)
-
-
+        
+        # Кнопка скачивания SEG-Y (используем уже созданный буфер)
+        if sgy_buffer is not None:
+            sgy_buffer.seek(0) # Сбрасываем курсор в начало для корректного скачивания
+            st.download_button(
+                label="Скачать все трассы SEG-Y",
+                data=sgy_buffer.getvalue(),
+                file_name="generated_traces.sgy",
+                mime="application/octet-stream"
+            )
 
     except Exception as e:
         st.error(f"Ошибка: {e}")
